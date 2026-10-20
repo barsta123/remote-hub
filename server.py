@@ -1202,6 +1202,10 @@ async def phones_refresher():
                 log_event("Podglad: rozlaczony (brak kodu dostepu)")
                 await send_to(ws, json.dumps({"t": "error", "m": "auth_timeout"}))
                 discard_client(ws)
+                try:
+                    await ws.close()
+                except Exception:
+                    pass
         if any(c["kind"] == "phone" for c in clients.values()) or clients:
             await push_phones()
 
