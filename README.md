@@ -90,6 +90,42 @@ przez WebSocket i przekazuje go do przeglądarki pod adresem:
    Testy: **25/25** (PIN on/off, auth, odrzuty, routing) + regresja **11/11** (v3)
    i **8/8** (v4). APK: **v1.4** (versionCode 5).
 
+## Nowe w v6 – wersja 1.5: pisanie, aplikacje, piękniejszy panel (20.10.2026)
+
+1. **PIN domyślnie włączony: 4949** – panel jest chroniony od razu po deployu,
+   bez konfigurowania zmiennych. Zmienna `ACCESS_PIN` nadal działa (inny kod),
+   a `ACCESS_PIN=""` wyłącza PIN (jak w v1–v4). Szczegóły w sekcji „Bezpieczeństwo".
+2. **Redesign panelu „2027”** – ciemny motyw glass/gradienty, pill-tabs, cztery
+   zakładki: **Podgląd / Aplikacje / Telefony / Ustawienia**.
+3. **Pisanie z klawiatury komputera** – przycisk **⌨ Pisanie** i tryb pisania:
+   co wpiszesz na klawiaturze PC (litery, spacja, Enter, Backspace, Tab) trafia
+   na pole tekstowe telefonu na żywo. Esc wyłącza tryb.
+4. **Lista aplikacji** – zakładka Aplikacje pobiera z telefonu siatkę ikonek
+   (do 150 aplikacji) i uruchamia je jednym kliknięciem na telefonie.
+5. **Bateria telefonu** – telefon raportuje poziom baterii (hello/stat),
+   widoczny jako chip przy nazwie i w tabeli telefonów; apka pokazuje ją też
+   w powiadomieniu usługi (żywy status: „Połączony · bateria 87%").
+6. **Nowe sterowanie myszą**:
+   - **podwójne kliknięcie** = double-tap (zoom w galerii, otwieranie linków),
+   - **kółko myszy** = przewijanie strony telefonu,
+   - **prawy przycisk myszy** = Wstecz,
+   - **Ctrl + kółko** = zoom obrazu podglądu, **Shift + przeciągnięcie** = przesuwanie,
+   - ripple na kliku – widać, gdzie trafił dotyk.
+7. **Jakość FPS w presetach** – Niski 8 / Średni 15 (domyślny) / Wysoki 24 /
+   Ultra 30; apka nadaje do 30 FPS (dawniej limit 10).
+8. **Nagrywanie wideo** – przycisk „⏺ Nagrywaj wideo” w panelu Sesja nagrywa
+   obraz z telefonu i zapisuje plik `.webm` na komputerze.
+9. **Wykrywanie zgaszonego ekranu** – gdy telefon przez chwilę wysyła niemal
+   czarny obraz, panel wyświetla chip „💤 Ekran zgaszony".
+10. **Lista telefonów: „Aktywne teraz”** – rozwijane menu dzieli telefony na
+    aktywne (online, na górze) i zapisane (offline); serwer odświeża listę co 5 s.
+11. **Fix i płynność ekranu** – obraz dopasowany do kontenera (object-fit +
+    korekta współrzędnych gestów), brak ucinania i lagów, brak ciężkich efektów
+    CSS (backdrop-filter), brak dekodowania klatek na ukrytej karcie.
+12. **APK 1.5 (versionCode 6)** – poza sterowaniem z panelu: wysyła baterię,
+    obsługuje `dblclick`, `key`, `text`, `clip` (schowek), `apps`, `launch`;
+    ciemny motyw „Remote Hub” w aplikacji. Testy serwera: **37/37**.
+
 ## Instrukcja dla Androida 13+: „Ograniczony dostęp"
 
 Aplikacja zainstalowana spoza Sklepu Play napotka blokade systemu przy probie
@@ -119,16 +155,16 @@ python server.py            # http://localhost:8000
 
 ## Bezpieczeństwo (kod dostępu / PIN)
 
-Od v5 panel można chronić kodem dostępu:
+Od v6 panel jest **chroniony domyślnym kodem 4949** – nie trzeba nic konfigurować.
 
-1. Na Render: **Environment → + Add Environment Variable**
-   - Key: `ACCESS_PIN`
-   - Value: np. `4711` (swój własny kod)
-2. Render przebuduje usługę (~100 s). Sprawdź:
-   `https://remote-hub-server-ojx3.onrender.com/health` → pole `"auth": "on"`.
-3. **Kolejność ma znaczenie:** najpierw zainstaluj apkę **1.4** i wpisz ten sam PIN
-   w panelu apki (sekcja „Kod dostepu do panelu"), *potem* ustaw `ACCESS_PIN`.
-   Telefon ze starą apką (bez pola PIN) nie połączy się z zabezpieczonym serwerem.
-4. Aby wrócić do otwartego panelu – usuń zmienną `ACCESS_PIN` na Render.
+1. Po wejściu na panel wpisz PIN **4949** (okno logowania). Niezalogowani nie
+   dostają klatek ani nie sterują niczym; po 4 złych próbach są rozłączani.
+2. W apce (sekcja „Kod dostępu do panelu”) wpisz ten sam PIN **4949** – telefon
+   bez poprawnego kodu serwer odrzuca. Porównanie przez `hmac.compare_digest`.
+3. **Swój własny kod:** na Render ustaw `ACCESS_PIN` (np. `4711`) w
+   **Environment → + Add Environment Variable**; Render przebuduje usługę (~100 s),
+   a Ty wpiszesz nowy kod i w apce, i w panelu.
+4. **Panel otwarty (bez PIN-a)** – ustaw `ACCESS_PIN=""` (pusta wartość);
+   wróci wtedy tryb jak w v1–v4 (ale apka 1.5 może wtedy łączyć się bez kodu).
 5. Bez PIN-u nadal obowiązuje: traktuj adres URL jak tajny (każdy, kto go zna,
    widzi ekran i steruje telefonem).
