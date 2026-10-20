@@ -4,12 +4,12 @@ import os
 
 connected_devices = set()
 
-async def handler(websocket, path):
+async def handler(websocket):
     connected_devices.add(websocket)
     print(f"[+] Nowe urządzenie połączone. Razem online: {len(connected_devices)}")
     try:
         async for message in websocket:
-            # Przekazywanie strumienia/komend do wszystkich innych połączonych (np. z agenta do panelu)
+            # Przekazywanie wiadomości/strumienia do pozostałych połączonych
             for client in connected_devices:
                 if client != websocket:
                     await client.send(message)
@@ -21,9 +21,9 @@ async def handler(websocket, path):
 
 async def main():
     port = int(os.environ.get("PORT", 8080))
-    async.server = await websockets.serve(handler, "0.0.0.0", port)
-    print(f"[*] Serwer przekaźnikowy ruszył na porcie {port}")
-    await asyncio.Future()
+    async with websockets.serve(handler, "0.0.0.0", port):
+        print(f"[*] Serwer przekaźnikowy ruszył na porcie {port}")
+        await asyncio.Future()
 
 if __name__ == "__main__":
     asyncio.run(main())
