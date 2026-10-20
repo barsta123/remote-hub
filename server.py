@@ -266,7 +266,7 @@ async def route_command(sender, obj: dict):
         await push_phones()
         return
 
-    if kind in ("text", "clip", "launch", "apps", "dblclick"):
+    if kind in ("text", "keys", "clip", "launch", "apps", "dblclick", "audio"):
         # Komendy dzialajace tylko gdy apka ma wlaczona usluge dostepnosci -
         # serwer przekazuje je do wybranego telefonu jak kazda inna.
         phone = resolve_phone(clients[sender].get("sub"))
@@ -490,6 +490,15 @@ html_content = r"""
             font-size: 11px; font-weight: 700;
         }
         .darkchip.show { display: inline-block; animation: pulse 2s infinite; }
+        .kbdecho {
+            position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%);
+            display: none; background: rgba(6, 9, 16, 0.85);
+            border: 1px solid rgba(108, 140, 255, 0.5);
+            color: #dfe6ff; border-radius: 999px; padding: 5px 14px; font-size: 12px;
+            font-family: ui-monospace, monospace; z-index: 6; max-width: 90%;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        }
+        .kbdecho.show { display: inline-block; }
 
         .zoombAR {
             position: absolute; left: 10px; bottom: 10px; z-index: 6;
@@ -665,6 +674,7 @@ html_content = r"""
                         <div class="livechip" id="liveChip"><i></i>LIVE</div>
                         <div class="reschip" id="resChip"></div>
                         <div class="darkchip" id="darkChip">&#128164; Ekran zgaszony</div>
+                        <div class="kbdecho" id="kbdEcho"></div>
                         <div class="zoombAR">
                             <button id="btnZoomOut" title="Pomniejsz">&#8722;</button>
                             <span id="zoomLabel">100%</span>
@@ -690,8 +700,8 @@ html_content = r"""
                         <label>Jakosc:</label>
                         <select id="qualitySel" title="Jakosc i czestotliwosc wysylania klatek">
                             <option value="low">Lekka &middot; 8 FPS / 720 px</option>
-                            <option value="medium" selected>Szybka &middot; 15 FPS / 960 px</option>
-                            <option value="high">Bardzo szybka &middot; 24 FPS / 1280 px</option>
+                            <option value="medium">Szybka &middot; 15 FPS / 960 px</option>
+                            <option value="high" selected>Bardzo szybka &middot; 24 FPS / 1280 px</option>
                             <option value="ultra">Maksymalna &middot; 30 FPS / 1600 px</option>
                         </select>
                     </div>
@@ -734,6 +744,12 @@ html_content = r"""
                     </div>
                     <button id="btnRec" class="primary" style="width:100%; margin-top:11px;"
                             title="Nagrywa obraz z telefonu do pliku wideo (webm)">&#9210; Nagrywaj wideo</button>
+                    <button id="btnAudio" style="width:100%; margin-top:8px;"
+                            title="Dzwiek z telefonu na zywo (Android 10+). Telefon poprosi o uprawnienie do nagrywania.">&#128266; Dzwiek: wylaczony</button>
+                    <div style="display:flex;align-items:center;gap:8px;margin-top:7px;font-size:12px;color:var(--dim);">
+                        <span style="flex:0 0 auto;">Glosnosc</span>
+                        <input type="range" id="audioVol" min="0" max="100" value="80" style="flex:1;">
+                    </div>
                 </div>
             </div>
         </div>
@@ -877,6 +893,9 @@ html_content = r"""
         var byteWindow = 0, kbps = 0, totalBytes = 0;
         var sessStart = Date.now(), sessFrames = 0;
         var lastObjectUrl = null, paused = false;
+        // Ramki czekajace na dekodowanie (walka z blyskami czerni):
+        var pendingFrame = null;      // najnowsza kladka czekajaca na gotowosc obrazu
+        var staleUrls = [];           // blob URL-e starszych klatek do zwolnienia
         var phones = {}, autoPhoneId = null, pinRequired = false, authed = true;
         var selectedPhone = localStorage.getItem("rh_phone") || "auto";
         var quality = localStorage.getItem("rh_quality") || "medium";
@@ -890,12 +909,12 @@ html_content = r"""
 
         var QUALITIES = {
             low:    { fps: 8,  q: 30, max: 720  },
-            medium: { fps: 15, q: 36, max: 960  },
-            high:   { fps: 24, q: 42, max: 1280 },
-            ultra:  { fps: 30, q: 50, max: 1600 }
+            medium: { fps: 15, q: 34, max: 960  },
+            high:   { fps: 24, q: 38, max: 1280 },
+            ultra:  { fps: 30, q: 46, max: 1600 }
         };
 
-        qualitySel.value = QUALITIES[quality] ? quality : "medium";
+        qualitySel.value = QUALITIES[quality] ? quality : "high";
 
         function setServer(state, on) { srvState.textContent = state; srvDot.className = "dot " + (on ? "on" : "off"); }
         function setPhone(state, on) { phState.textContent = state; phDot.className = "dot " + (on ? "on" : "off"); }
@@ -934,7 +953,7 @@ html_content = r"""
             var protocol = location.protocol === "https:" ? "wss:" : "ws:";
             try { ws = new WebSocket(protocol + "//" + location.host); }
             catch (e) { scheduleRetry(); return; }
-            ws.binaryType = "blob";
+            ws.binaryType = "arraybuffer";
 
             ws.onopen = function () {
                 backoff = 1000;
@@ -945,6 +964,7 @@ html_content = r"""
                 if (pinRequired && saved) send({ t: "auth", pin: saved });
                 sendView();
                 sendQuality();
+                if (audioWanted) send({ t: "audio", on: 1 });   // powrot dzwieku po reconnect
             };
             ws.onmessage = function (event) {
                 var data = event.data;
@@ -952,7 +972,15 @@ html_content = r"""
                     if (data.charAt(0) === "{") { handleStatus(data); return; }
                     showFrame("data:image/jpeg;base64," + data, data.length * 0.75);
                 } else {
-                    showFrame(URL.createObjectURL(data), data.size || 0);
+                    var u8 = new Uint8Array(data);
+                    if (u8.length > 12 && u8[0] === 0xA5 && u8[1] === 0x5A) {
+                        playAudioChunk(u8);   // ramka dzwieku PCM z telefonu
+                        return;
+                    }
+                    showFrame(
+                        URL.createObjectURL(new Blob([data], { type: "image/jpeg" })),
+                        data.byteLength || 0
+                    );
                 }
             };
             ws.onclose = function () { setServer("rozlaczony - ponawiam...", false); scheduleRetry(); };
@@ -1019,6 +1047,15 @@ html_content = r"""
                 appsRequestedAt = 0;
                 renderApps();
                 toast("Odebrano liste: " + appsList.length + " aplikacji");
+            } else if (msg.t === "audio") {
+                if (msg.err) {
+                    audioWanted = false;
+                    btnAudio.classList.remove("active");
+                    btnAudio.innerHTML = "&#128266; Dzwiek: wylaczony";
+                    toast("Dzwiek: " + msg.err);
+                } else {
+                    toast(msg.on ? "Dzwiek z telefonu wlaczony" : "Dzwiek wylaczony");
+                }
             } else if (msg.t === "error") {
                 toast("Serwer: " + (msg.m || "blad"));
             }
@@ -1242,9 +1279,26 @@ html_content = r"""
             lastFrameAt = Date.now();
             byteWindow += bytes || 0; totalBytes += bytes || 0;
             framesEl.textContent = totalFrames;
-            if (paused || document.hidden) return;   // ukryta karta nie dekoduje klatek (mniej lagow)
-            if (lastObjectUrl) { URL.revokeObjectURL(lastObjectUrl); lastObjectUrl = null; }
-            if (src.indexOf("blob:") === 0) lastObjectUrl = src;
+            if (paused || document.hidden) {
+                // ukryta karta nie dekoduje klatek - od razu zwalniamy pamiec
+                if (src.indexOf("blob:") === 0) URL.revokeObjectURL(src);
+                return;
+            }
+            // KAZDA klatka musi sie zdekodowac do konca - wczesniejsza zamiana src
+            // przerywala dekodowanie i dawala blyski czerni. Najnowsza klatka
+            // czeka w pending i wskakuje natychmiast po gotowosci obrazu.
+            if (!screenView.complete && screenView.src) {
+                if (pendingFrame && pendingFrame.indexOf("blob:") === 0) URL.revokeObjectURL(pendingFrame);
+                pendingFrame = src;
+                return;
+            }
+            applyFrame(src);
+        }
+        function applyFrame(src) {
+            if (src.indexOf("blob:") === 0) {
+                if (lastObjectUrl) staleUrls.push(lastObjectUrl);
+                lastObjectUrl = src;
+            }
             screenView.src = src;
             screenView.style.display = "block";
             placeholder.style.display = "none";
@@ -1254,6 +1308,14 @@ html_content = r"""
                 try { recCtx.drawImage(screenView, 0, 0, recCanvas.width, recCanvas.height); } catch (ignored) {}
             }
         }
+        screenView.addEventListener("load", function () {
+            // dekodowanie zakonczone - dopiero teraz zwalniamy starsze URL-e klatek
+            while (staleUrls.length) {
+                var u = staleUrls.shift();
+                if (u !== screenView.src && u !== pendingFrame) URL.revokeObjectURL(u);
+            }
+            if (pendingFrame) { var p = pendingFrame; pendingFrame = null; applyFrame(p); }
+        });
         function textOfSelected() {
             var id = selectedPhone === "auto" ? autoPhoneId : selectedPhone;
             var p = phones[id];
@@ -1526,6 +1588,21 @@ html_content = r"""
                      : "Pisanie wylaczone - wracaja skroty B/H/L/F");
         }
         document.getElementById("btnKbd").addEventListener("click", function () { setKbd(!kbdMode); });
+        var kbdBuffer = "", kbdTimer = null;
+        function flushKbd() {
+            clearTimeout(kbdTimer); kbdTimer = null;
+            if (!kbdBuffer) return;
+            var s = kbdBuffer; kbdBuffer = "";
+            // jedna komenda z cala porcja znakow zamiast potoku klawiszy (brak lagow)
+            if (!send({ t: "keys", s: s })) toast("Brak polaczenia z telefonem");
+        }
+        function kbdEcho(ch) {
+            var el = document.getElementById("kbdEcho");
+            el.textContent = (el.textContent + ch).slice(-42);
+            el.classList.add("show");
+            clearTimeout(el._t);
+            el._t = setTimeout(function () { el.classList.remove("show"); el.textContent = ""; }, 1600);
+        }
         document.getElementById("btnAppsShortcut").addEventListener("click", function () { gotoTab("tabAplikacje"); });
         document.getElementById("btnLogShortcut").addEventListener("click", function () { gotoTab("tabUstawienia"); });
 
@@ -1562,6 +1639,70 @@ html_content = r"""
                 for (var i = 0; i < d.length; i += 4) sum += (d[i] + d[i + 1] + d[i + 2]) / 3;
                 return (sum / (d.length / 4)) < 4;   // tylko prawie czysta czern = ekran zgaszony
             } catch (e) { return false; }
+        }
+
+        // ------------------------------------------------------------------
+        // Dzwiek z telefonu na zywo (Android 10+, AudioPlaybackCapture)
+        // ------------------------------------------------------------------
+        var audioCtx = null, audioGain = null, audioNextAt = 0, audioWanted = false;
+        var btnAudio = document.getElementById("btnAudio");
+        btnAudio.addEventListener("click", function () {
+            audioWanted = !audioWanted;
+            if (audioWanted) {
+                try {
+                    if (!audioCtx) {
+                        var AC = window.AudioContext || window.webkitAudioContext;
+                        audioCtx = new AC();
+                        audioGain = audioCtx.createGain();
+                        audioGain.gain.value = document.getElementById("audioVol").value / 100;
+                        audioGain.connect(audioCtx.destination);
+                    }
+                    audioCtx.resume();
+                    audioNextAt = 0;
+                    if (!send({ t: "audio", on: 1 })) {
+                        toast("Brak polaczenia z telefonem");
+                        audioWanted = false;
+                        return;
+                    }
+                    btnAudio.classList.add("active");
+                    btnAudio.innerHTML = "&#128266; Dzwiek: wlaczony";
+                    toast("Pytam telefon o dzwiek - telefon poprosi o uprawnienia");
+                } catch (e) {
+                    audioWanted = false;
+                    toast("Dzwiek niedostepny w tej przegladarce");
+                }
+            } else {
+                send({ t: "audio", on: 0 });
+                btnAudio.classList.remove("active");
+                btnAudio.innerHTML = "&#128266; Dzwiek: wylaczony";
+            }
+        });
+        document.getElementById("audioVol").addEventListener("input", function () {
+            if (audioGain) audioGain.gain.value = this.value / 100;
+        });
+
+        function playAudioChunk(u8) {
+            if (!audioCtx || !audioWanted) return;
+            try {
+                var rate = u8[4] | (u8[5] << 8) | (u8[6] << 16) | (u8[7] << 24);
+                var samples = u8[8] | (u8[9] << 8) | (u8[10] << 16) | (u8[11] << 24);
+                if (!rate || !samples || u8.length < 12 + samples * 2) return;
+                var buf = audioCtx.createBuffer(1, samples, rate);
+                var ch = buf.getChannelData(0);
+                for (var i = 0; i < samples; i++) {
+                    ch[i] = (u8[12 + i * 2] | (u8[13 + i * 2] << 8)) / 32768;
+                }
+                var now = audioCtx.currentTime;
+                // jitter buffer: start ~120 ms do przodu; po przerwie re-synchronizacja
+                if (!audioNextAt || audioNextAt < now || audioNextAt > now + 1.0) {
+                    audioNextAt = now + 0.12;
+                }
+                var src = audioCtx.createBufferSource();
+                src.buffer = buf;
+                src.connect(audioGain);
+                src.start(audioNextAt);
+                audioNextAt += samples / rate;
+            } catch (e) {}
         }
 
         var btnRec = document.getElementById("btnRec");
@@ -1681,12 +1822,21 @@ html_content = r"""
         window.addEventListener("keydown", function (e) {
             if (e.target.tagName === "SELECT" || e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
             if (kbdMode) {
-                if (e.key === "Escape") { setKbd(false); e.preventDefault(); return; }
+                if (e.key === "Escape") { setKbd(false); flushKbd(); e.preventDefault(); return; }
                 if (e.ctrlKey || e.metaKey || e.altKey) return;
                 var kk = e.key;
                 if (kk === "Backspace" || kk === "Enter" || kk === "Tab" || (kk.length === 1 && !e.ctrlKey && !e.metaKey)) {
-                    if (send({ t: "key", k: kk })) e.preventDefault();
-                    else toast("Brak polaczenia z telefonem");
+                    e.preventDefault();
+                    if (kk === "Enter" || kk === "Tab" || kk === "Backspace") {
+                        flushKbd();   // specjalne - najpierw bufor znakow, potem komenda
+                        if (send({ t: "key", k: kk })) {
+                            kbdEcho(kk === "Backspace" ? "<-" : kk === "Enter" ? "ENTER " : "TAB ");
+                        } else toast("Brak polaczenia z telefonem");
+                    } else {
+                        kbdBuffer += kk;
+                        if (!kbdTimer) kbdTimer = setTimeout(flushKbd, 55);
+                        kbdEcho(kk);
+                    }
                 }
                 return;
             }
