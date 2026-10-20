@@ -42,30 +42,89 @@ relay_lock = asyncio.Lock()
 PHONE_IDLE_ONLINE = 8.0      # po ilu sekundach bez klatki telefon = offline
 PHONES_PUSH_INTERVAL = 5.0   # co ile sekund odswiezamy liste telefonu w przegladarkach
 
+# ---------------------------------------------------------------------------
+# Spis wszystkich telefonow, ktore kiedykolwiek polaczyla sie z apka.
+# Dzieki niu menu wyboru pokazuje tez urzadzenia offline (np. wylaczony
+# telefon). Trzymany w pliku JSON obok serwera (po restarcie serwera lista
+# nie znika; na Render plik zyje do nastepnego redeploya).
+# ---------------------------------------------------------------------------
+KNOWN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "phones.json")
+known: dict = {}   # id -> {"model": str, "name": str|None, "last_seen": float}
+
+
+def load_known():
+    try:
+        with open(KNOWN_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, dict):
+                known.update(data)
+        print(f"[known] wczytano {len(known)} telefonow z {KNOWN_FILE}", flush=True)
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        print(f"[known] blad wczytywania: {e}", flush=True)
+
+
+def save_known():
+    try:
+        with open(KNOWN_FILE, "w", encoding="utf-8") as f:
+            json.dump(known, f, ensure_ascii=False, indent=1)
+    except Exception as e:
+        print(f"[known] zapis nieudany: {e}", flush=True)
+
+
+def remember_phone(dev_id, model):
+    k = known.get(dev_id) or {}
+    if model:
+        k["model"] = model
+    k["last_seen"] = now()
+    known[dev_id] = k
+    save_known()
+
 
 def now() -> float:
     return time.time()
 
 
 def phone_list():
-    """Lista telefonow dla przegladarek."""
+    """Lista telefonow dla przegladarek: polaczone + pamietane offline."""
     out = []
+    connected_ids = set()
     for ws, c in list(clients.items()):
         if c["kind"] != "phone":
             continue
+        connected_ids.add(c["id"])
         # Telefon bez klatek (dopiero co sie polaczyl) traktujemy jak online
         # na podstawie czasu polaczenia - nie epoch.
         idle = now() - (c["last_frame"] or c["connected"])
+        k = known.get(c["id"]) or {}
         out.append(
             {
                 "id": c["id"],
                 "model": c["model"],
+                "name": k.get("name"),
                 "frames": c["frames"],
                 "online": idle <= PHONE_IDLE_ONLINE,
                 "since": round(idle, 1),
             }
         )
-    out.sort(key=lambda p: (not p["online"], p["model"]))
+    # Telefony z zainstalowana apka, ktore teraz nie nadaja - dalej widoczne
+    # w menu wyboru (status offline + czas ostatniego widzenia).
+    for dev_id, k in known.items():
+        if dev_id in connected_ids:
+            continue
+        idle = max(0.0, now() - float(k.get("last_seen") or 0.0))
+        out.append(
+            {
+                "id": dev_id,
+                "model": k.get("model") or "nieznany",
+                "name": k.get("name"),
+                "frames": 0,
+                "online": False,
+                "since": round(idle, 1),
+            }
+        )
+    out.sort(key=lambda p: (not p["online"], (p["name"] or p["model"]).lower()))
     return out
 
 
@@ -169,6 +228,15 @@ async def route_command(sender, obj: dict):
         await push_phones()
         return
 
+    if kind == "rename":
+        pid = obj.get("id")
+        name = str(obj.get("name") or "").strip()[:40]
+        if pid in known:
+            known[pid]["name"] = name or None
+            save_known()
+            await push_phones()
+        return
+
     if kind == "phones":
         await push_phones()
         return
@@ -260,6 +328,10 @@ html_content = """
             </select>
         </div>
         <div class="row" style="margin-bottom:10px;">
+            <label>Nazwa:</label>
+            <button id="btnRename" style="flex:1;" title="Nadaj wlasna nazwe wybranemu telefonowi (np. 'Telefon taty')">Zmien nazwe wybranego telefonu</button>
+        </div>
+        <div class="row" style="margin-bottom:10px;">
             <label>Jakosc:</label>
             <select id="qualitySel" title="Jakosc i czestotliwosc wysylania klatek">
                 <option value="low">Niska - 5 FPS / mala rozdzielczosc</option>
@@ -288,7 +360,12 @@ html_content = """
 
     <div class="hint">
         <b>Klik</b> w obraz = dotkniecie ekranu. <b>Przeciagniecie</b> = swipe na telefonie.<br>
-        Aby dzialalo sterowanie, wlacz usluge <b>Remote Control</b> w Ustawieniach &rarr; Dostepnosc telefonu.<br>
+        Na liscie wyboru widzisz <b>wszystkie telefony z zainstalowana apka</b> - takze te offline
+        (z czasem ostatniego widzenia). Kazdemu zmienisz nazwe przyciskiem obok.<br>
+        Aby dzialalo sterowanie, w telefonie z apka: przy pierwszym uruchomieniu kliknij
+        <b>"Wlacz teraz"</b> w okienku, przesun przełącznik uslugi dostepnosci - jesli pisze
+        <b>"Ograniczony dostep"</b>, wejdź w Ustawienia -> Aplikacje -> Remote Control -> <b>&#8942;</b>
+        -> <b>Zezwol na ograniczone ustawienia</b> i wróć wlaczyc przełącznik.<br>
         Pamietaj: ekran telefonu musi byc wlaczony, a optymalizacja baterii wylaczona dla apki.
     </div>
 
@@ -390,7 +467,8 @@ html_content = """
             var ids = Object.keys(phones);
             ids.forEach(function (id) {
                 var p = phones[id];
-                var label = p.model + (p.online ? " - online" : " - offline (" + p.since + "s)");
+                var label = (p.name || p.model) +
+                    (p.online ? " - online" : " - offline, widziany " + fmtSince(p.since));
                 html += '<option value="' + id + '">' + label + '</option>';
             });
             phoneSel.innerHTML = html;
@@ -452,7 +530,7 @@ html_content = """
         function textOfSelected() {
             var id = selectedPhone === "auto" ? autoPhoneId : selectedPhone;
             var p = phones[id];
-            return p ? p.model : "na zywo";
+            return p ? (p.name || p.model) : "na zywo";
         }
 
         setInterval(function () {
@@ -513,6 +591,28 @@ html_content = """
             touchStart = null;
         }, { passive: true });
         function r4(v) { return Math.round(v * 10000) / 10000; }
+
+        function fmtSince(s) {
+            if (s < 90) return Math.round(s) + " s temu";
+            if (s < 5400) return Math.round(s / 60) + " min temu";
+            if (s < 172800) return Math.round(s / 3600) + " godz. temu";
+            return Math.round(s / 86400) + " dni temu";
+        }
+
+        // ------------------------------------------------------------------
+        // Nazwy wlasne telefonow (widoczne w menu wyboru)
+        // ------------------------------------------------------------------
+        document.getElementById("btnRename").addEventListener("click", function () {
+            if (selectedPhone === "auto" || !phones[selectedPhone]) {
+                toast("Najpierw wybierz telefon z listy");
+                return;
+            }
+            var p = phones[selectedPhone];
+            var name = prompt("Nazwa tego telefonu (pusta = pokazuj model):", p.name || p.model || "");
+            if (name === null) return;
+            send({ t: "rename", id: selectedPhone, name: name.trim() });
+            toast("Zapisano nazwe");
+        });
 
         document.getElementById("btnBack").addEventListener("click", function () { send({ t: "back" }); toast("Wstecz"); });
         document.getElementById("btnHome").addEventListener("click", function () { send({ t: "home" }); toast("Home"); });
@@ -636,6 +736,9 @@ async def websocket_endpoint(websocket: WebSocket):
                 # klatki z obu telefonow naraz.
                 await relay_frame(websocket, data)
                 c["last_frame"] = now()
+                k = known.get(c["id"])
+                if k is not None:
+                    k["last_seen"] = c["last_frame"]   # bez zapisu (co klatke)
                 continue
 
             # Wiadomosc tekstowa: komenda JSON albo ramka base64.
@@ -651,6 +754,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     c["kind"] = "phone"
                     c["id"] = dev_id
                     c["model"] = obj.get("device") or "nieznany"
+                    remember_phone(dev_id, c["model"])
                     if DEBUG:
                         print(f"[ws] phone {c['model']} ({c['id']}) connected", flush=True)
                     await push_phones()
@@ -675,6 +779,9 @@ async def websocket_endpoint(websocket: WebSocket):
                 c["frames"] += 1
                 await relay_frame(websocket, data)  # routing przed timestampem
                 c["last_frame"] = now()
+                k = known.get(c["id"])
+                if k is not None:
+                    k["last_seen"] = c["last_frame"]   # bez zapisu (co klatke)
 
     except WebSocketDisconnect:
         pass
@@ -702,6 +809,7 @@ async def phones_refresher():
 
 @app.on_event("startup")
 async def startup():
+    load_known()
     asyncio.create_task(phones_refresher())
 
 
