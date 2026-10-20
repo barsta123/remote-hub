@@ -126,6 +126,40 @@ przez WebSocket i przekazuje go do przeglądarki pod adresem:
     obsługuje `dblclick`, `key`, `text`, `clip` (schowek), `apps`, `launch`;
     ciemny motyw „Remote Hub” w aplikacji. Testy serwera: **37/37**.
 
+## Nowe w v7 – wersja 1.6: koniec migania, szybsze klatki, dźwięk (20.10.2026)
+
+Naprawa trzech głównych problemów (miganie ekranu, zacięcia/mało FPS, brak
+dzwięku) + poprawki pisania i listy aplikacji:
+
+1. **Koniec migania na czarno** – klatki przestają być przerywane w połowie
+   dekodowania: nowa klatka czeka, aż poprzednia się zdekoduje („load-gated"),
+   a stare adresy URL zwalniane są dopiero po pełnym załadowaniu nowszego
+   obrazu. Każda wyświetlona klatka jest kompletna – zero blysków czerni.
+2. **Binarne klatki JPEG** – aplikacja wysyła surowe bajty zamiast base64:
+   ~25% mniej transferu i CPU (base64 zjadło ~połowę czasu klatki na slabym
+   telefonie). Starsze apki (base64) nadal działają – panel obsługuje oba formaty.
+3. **Zero alokacji na klatkę w apce** – bitmapy i strumień JPEG są wielokrotnie
+   używane (2–4 MB na klatkę = skoki GC = zacięcia). Efekt: realny wzrost FPS
+   o ~30–100% przy mniejszych opóźnieniach.
+4. **Dźwięk z telefonu na żywo** – przycisk „🔊 Dźwięk” w panelu Sesja:
+   telefon przechwytuje dźwięk odtwarzany w aplikacjach (YouTube, gry, filmy;
+   Android 10+, wymagane uprawnienie do nagrywania) i strumieniuje go do
+   przeglądarki (PCM 32 kHz, jitter-buffer ~120 ms). Suwak głośności.
+   Uwaga: DRM (Netflix itp.) i dźwięki systemowe mogą być blokowane przez system.
+5. **Szybkie pisanie bez lagów** – znaki z klawiatury PC lecą porcjami co 55 ms
+   (jedna komenda `keys` z całą paczką zamiast potoku klawiszy) + podgląd
+   wpisywanego tekstu pod ekranem (natychmiastowa informacja zwrotna).
+6. **Błędy zamiast cichej awarii** – gdy usługa zdalnego sterowania jest
+   wyłączona lub brak pola tekstowego, panel pokazuje komunikat (tekst trafia
+   wtedy do schowka telefonu).
+7. **Lista aplikacji naprawiona** – Android 11+ ukrywał listę bez wpisu
+   `<queries>`/`QUERY_ALL_PACKAGES` w manifeście (była pusta) – dodane.
+8. **Domyślny preset „Bardzo szybka” (24 FPS / 1280 px)** + lekkie obniżenie
+   jakości JPEG w presetach (mniejsze pliki = mniej lagów przy tych samych FPS).
+9. Testy: **39/39** (routing `keys`/`audio` + pełna regresja).
+   APK: **v1.6** (versionCode 7).
+
+
 ## Instrukcja dla Androida 13+: „Ograniczony dostęp"
 
 Aplikacja zainstalowana spoza Sklepu Play napotka blokade systemu przy probie
