@@ -30,8 +30,9 @@ app = FastAPI(title="Remote Hub")
 
 DEBUG = os.environ.get("DEBUG", "") == "1"
 
-# Kod dostepu do panelu; pusty = panel otwarty dla wszystkich.
-ACCESS_PIN = os.environ.get("ACCESS_PIN", "").strip()
+# Kod dostepu do panelu. Domyslnie 4949 - panel NIGDY nie startuje otwarty.
+# Zeby wylaczyc zabezpieczenie, ustaw na Render zmienna ACCESS_PIN="" (pusta).
+ACCESS_PIN = os.environ.get("ACCESS_PIN", "4949").strip()
 
 # ---------------------------------------------------------------------------
 # Stan polaczen
@@ -128,6 +129,7 @@ def phone_list():
                 "frames": c["frames"],
                 "online": idle <= PHONE_IDLE_ONLINE,
                 "since": round(idle, 1),
+                "bat": c.get("bat"),
             }
         )
     for dev_id, k in known.items():
@@ -142,6 +144,7 @@ def phone_list():
                 "frames": 0,
                 "online": False,
                 "since": round(idle, 1),
+                "bat": None,
             }
         )
     out.sort(key=lambda p: (not p["online"], (p["name"] or p["model"]).lower()))
@@ -263,6 +266,14 @@ async def route_command(sender, obj: dict):
         await push_phones()
         return
 
+    if kind in ("text", "clip", "launch", "apps", "dblclick"):
+        # Komendy dzialajace tylko gdy apka ma wlaczona usluge dostepnosci -
+        # serwer przekazuje je do wybranego telefonu jak kazda inna.
+        phone = resolve_phone(clients[sender].get("sub"))
+        if phone is not None:
+            await send_to(phone, json.dumps(obj))
+        return
+
     phone = resolve_phone(clients[sender].get("sub"))
     if phone is None:
         return
@@ -272,7 +283,7 @@ async def route_command(sender, obj: dict):
 # ---------------------------------------------------------------------------
 # Strona panelu (v5 - trzy zakladki)
 # ---------------------------------------------------------------------------
-html_content = """
+html_content = r"""
 <!DOCTYPE html>
 <html lang="pl">
 <head>
@@ -280,141 +291,487 @@ html_content = """
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Remote Hub - Panel</title>
     <style>
+        :root {
+            --bg0: #05070d;
+            --bg1: #0a0e1a;
+            --glass: rgba(16, 21, 38, 0.72);
+            --glass2: rgba(22, 28, 48, 0.55);
+            --brd: rgba(140, 160, 230, 0.14);
+            --brd-hi: rgba(150, 170, 255, 0.35);
+            --txt: #e9edfb;
+            --dim: #93a0c4;
+            --dim2: #5d6a8f;
+            --acc: #6c8cff;
+            --acc2: #37e6c0;
+            --acc3: #c07bff;
+            --ok: #2ee6a8;
+            --bad: #ff6b81;
+            --warn: #ffc857;
+            --r-lg: 20px;
+            --r-md: 14px;
+            --r-sm: 10px;
+            --grad: linear-gradient(135deg, #6c8cff 0%, #37e6c0 100%);
+            --grad3: linear-gradient(135deg, #6c8cff 0%, #c07bff 55%, #37e6c0 100%);
+        }
         * { box-sizing: border-box; }
+        html, body { height: 100%; }
         body {
-            background-color: #0d1117; color: #c9d1d9; margin: 0; padding: 14px;
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            margin: 0; padding: 18px 14px 40px;
+            color: var(--txt);
+            font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
             display: flex; flex-direction: column; align-items: center; min-height: 100vh;
+            background:
+                radial-gradient(1100px 650px at 12% -12%, #17223f 0%, transparent 62%),
+                radial-gradient(900px 620px at 105% -5%, #241342 0%, transparent 55%),
+                radial-gradient(800px 800px at 50% 120%, #07203a 0%, transparent 60%),
+                var(--bg0);
+            -webkit-font-smoothing: antialiased;
         }
-        h1 { color: #58a6ff; margin: 6px 0 4px; font-size: 21px; }
-        .badges { display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; margin-bottom: 12px; }
-        .badge { background: #161b22; border: 1px solid #30363d; border-radius: 999px; padding: 4px 11px; font-size: 12px; color: #8b949e; }
-        .badge b { color: #c9d1d9; font-weight: 600; }
-        .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #484f58; margin-right: 6px; vertical-align: 0px; }
-        .dot.on { background: #238636; box-shadow: 0 0 6px #238636; }
-        .dot.off { background: #da3633; }
+        ::-webkit-scrollbar { width: 10px; height: 10px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #27304e; border-radius: 99px; border: 2px solid var(--bg0); }
+        ::-webkit-scrollbar-thumb:hover { background: #38446e; }
 
-        /* Zakladki */
-        .tabs { display: flex; gap: 4px; margin-bottom: 12px; flex-wrap: wrap; justify-content: center; }
-        .tabbtn {
-            background: #161b22; color: #8b949e; border: 1px solid #30363d;
-            border-radius: 8px 8px 0 0; padding: 9px 20px; font-size: 14px; cursor: pointer;
+        /* ------------------------------ naglowek --------------------------- */
+        .brand { display: flex; align-items: center; gap: 13px; margin: 6px 0 4px; }
+        .logo {
+            width: 42px; height: 42px; border-radius: 13px;
+            background: var(--grad3);
+            display: flex; align-items: center; justify-content: center;
+            font-size: 20px; box-shadow: 0 8px 26px -8px rgba(108, 140, 255, 0.65);
+            position: relative; overflow: hidden;
         }
-        .tabbtn:hover { color: #c9d1d9; }
-        .tabbtn.active { background: #1f6feb; border-color: #1f6feb; color: #fff; font-weight: 600; }
-        .tab { display: none; width: min(860px, 97vw); }
-        .tab.active { display: block; }
+        .logo::after {
+            content: ""; position: absolute; inset: 0;
+            background: linear-gradient(120deg, transparent 35%, rgba(255,255,255,.28) 50%, transparent 65%);
+        }
+        h1 {
+            margin: 0; font-size: 23px; font-weight: 800; letter-spacing: -0.4px;
+            background: linear-gradient(90deg, #ffffff 10%, #9db4ff 55%, #37e6c0 100%);
+            -webkit-background-clip: text; background-clip: text; color: transparent;
+        }
+        .brand small { display: block; font-size: 11px; color: var(--dim2); font-weight: 500; letter-spacing: .16em; text-transform: uppercase; margin-top: 2px; }
+
+        .badges { display: flex; gap: 7px; flex-wrap: wrap; justify-content: center; margin: 12px 0 16px; }
+        .badge {
+            display: inline-flex; align-items: center; gap: 7px;
+            background: var(--glass); border: 1px solid var(--brd); border-radius: 999px;
+            padding: 6px 13px; font-size: 12px; color: var(--dim);
+            transition: border-color .3s;
+        }
+        .badge b { color: var(--txt); font-weight: 650; font-variant-numeric: tabular-nums; }
+        .badge.hot { border-color: var(--brd-hi); }
+        .dot { width: 8px; height: 8px; border-radius: 50%; background: #3a4568; flex: 0 0 auto; }
+        .dot.on { background: var(--ok); box-shadow: 0 0 0 0 rgba(46, 230, 168, .55); animation: pulse 2s infinite; }
+        .dot.off { background: var(--bad); }
+        @keyframes pulse {
+            0% { box-shadow: 0 0 0 0 rgba(46, 230, 168, .5); }
+            70% { box-shadow: 0 0 0 7px rgba(46, 230, 168, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(46, 230, 168, 0); }
+        }
+
+        /* ------------------------------ zakladki --------------------------- */
+        .tabs {
+            display: flex; gap: 4px; padding: 5px; margin-bottom: 16px;
+            background: rgba(14, 18, 33, 0.97); border: 1px solid var(--brd); border-radius: 999px;
+            position: sticky; top: 10px; z-index: 20;
+        }
+        .tabbtn {
+            background: transparent; color: var(--dim); border: 0;
+            border-radius: 999px; padding: 9px 20px; font-size: 13.5px; font-weight: 600;
+            cursor: pointer; transition: all .22s; display: flex; align-items: center; gap: 7px;
+        }
+        .tabbtn:hover { color: var(--txt); background: rgba(120, 140, 220, 0.10); }
+        .tabbtn.active {
+            background: var(--grad); color: #fff;
+            box-shadow: 0 6px 20px -8px rgba(108, 140, 255, 0.8);
+        }
+        .tab { display: none; width: min(1040px, 97vw); }
+        .tab.active { display: block; animation: fadeUp .28s cubic-bezier(.2,.7,.3,1); }
+        @keyframes fadeUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
 
         .panel {
-            background: #161b22; border: 1px solid #30363d; border-radius: 10px;
-            padding: 12px; margin-bottom: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+            background: rgba(14, 18, 33, 0.94); border: 1px solid var(--brd); border-radius: var(--r-lg);
+            padding: 16px; margin-bottom: 14px;
+            box-shadow: 0 24px 60px -34px rgba(0, 0, 0, 0.9);
+            transition: border-color .3s;
         }
-        .panel h2 { margin: 0 0 10px; font-size: 15px; color: #58a6ff; }
-        .row { display: flex; gap: 8px; align-items: center; }
-        .row label { font-size: 12px; color: #8b949e; min-width: 74px; }
+        .panel:hover { border-color: rgba(140, 160, 230, 0.22); }
+        .panel h2 {
+            margin: 0 0 12px; font-size: 11.5px; font-weight: 700;
+            letter-spacing: .14em; text-transform: uppercase; color: var(--acc);
+            display: flex; align-items: center; gap: 8px;
+        }
+        .panel h2::before {
+            content: ""; width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto;
+            background: var(--grad3); box-shadow: 0 0 10px rgba(108, 140, 255, .9);
+        }
+        .panel h2 .cnt { color: var(--dim2); font-weight: 600; letter-spacing: 0; text-transform: none; }
+        .row { display: flex; gap: 9px; align-items: center; }
+        .row label { font-size: 12px; color: var(--dim); min-width: 74px; }
         select, input[type=password], input[type=text] {
-            background: #0d1117; color: #c9d1d9; border: 1px solid #30363d;
-            border-radius: 6px; padding: 7px 8px; font-size: 13px; outline: none; flex: 1;
+            background: rgba(8, 11, 22, 0.8); color: var(--txt);
+            border: 1px solid var(--brd); border-radius: var(--r-sm);
+            padding: 9px 11px; font-size: 13.5px; outline: none; flex: 1;
+            transition: border-color .2s, box-shadow .2s;
         }
-        select:focus, input:focus { border-color: #58a6ff; }
+        select:focus, input:focus { border-color: var(--acc); box-shadow: 0 0 0 3px rgba(108, 140, 255, 0.18); }
+        select option { background: #0d1222; }
+
+        button {
+            background: rgba(120, 140, 220, 0.08); color: var(--txt);
+            border: 1px solid var(--brd); border-radius: var(--r-sm);
+            padding: 9px 8px; font-size: 12.5px; font-weight: 600; cursor: pointer;
+            transition: transform .15s, border-color .2s, background .2s, box-shadow .2s;
+            font-family: inherit;
+        }
+        button:hover { transform: translateY(-2px); border-color: var(--brd-hi); background: rgba(120, 140, 220, 0.16); }
+        button:active { transform: translateY(0); }
+        button.primary { background: var(--grad); border-color: transparent; color: #fff; box-shadow: 0 8px 22px -10px rgba(108, 140, 255, 0.9); }
+        button.primary:hover { filter: brightness(1.08); }
+        button.active { background: var(--grad); border-color: transparent; color: #fff; }
+        button.ghost { background: transparent; }
+        button.mini { padding: 5px 10px; font-size: 11.5px; border-radius: 8px; font-weight: 650; }
+
+        /* ------------------------------ podglad ---------------------------- */
+        .split { display: grid; grid-template-columns: minmax(0, 1.65fr) minmax(0, 1fr); gap: 14px; }
+        @media (max-width: 940px) { .split { grid-template-columns: 1fr; } }
 
         .screen-container {
-            width: 100%; background: #000; border-radius: 8px; overflow: hidden;
+            width: 100%; background: linear-gradient(160deg, #04060c, #080b14);
+            border-radius: var(--r-md); overflow: hidden; position: relative;
             display: flex; align-items: center; justify-content: center;
-            min-height: 360px; max-height: 70vh; position: relative;
+            height: max(240px, calc(100vh - 330px));
+            border: 1px solid var(--brd);
+            box-shadow: inset 0 0 60px rgba(0, 0, 0, 0.75);
+            transition: box-shadow .4s, border-color .4s;
         }
-        #screenView { width: 100%; height: 100%; object-fit: contain; display: none; min-height: 360px; cursor: crosshair; -webkit-user-drag: none; user-select: none; }
-        #placeholder { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #484f58; font-size: 14px; text-align: center; padding: 20px; pointer-events: none; }
-        .controls { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-top: 10px; }
-        button {
-            background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px;
-            padding: 8px 4px; font-size: 12px; cursor: pointer; transition: background .15s;
+        .screen-container.live {
+            border-color: rgba(46, 230, 168, 0.35);
+            box-shadow: inset 0 0 60px rgba(0,0,0,.75), 0 0 0 1px rgba(46,230,168,.18), 0 0 44px -14px rgba(46,230,168,.45);
         }
-        button:hover { background: #30363d; border-color: #8b949e; }
-        button:active { transform: translateY(1px); }
-        button.active { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+        .screen-container:fullscreen { width: 100%; height: 100%; }
+        #screenView {
+            position: absolute; inset: 0;
+            width: 100%; height: 100%; object-fit: contain; display: none;
+            cursor: crosshair; -webkit-user-drag: none; user-select: none; -webkit-user-select: none;
+            transform-origin: center center; will-change: transform;
+        }
+        #placeholder {
+            position: absolute; inset: 0; display: flex; flex-direction: column; gap: 8px;
+            align-items: center; justify-content: center; color: var(--dim2);
+            font-size: 14px; text-align: center; padding: 20px; pointer-events: none;
+        }
+        #placeholder .ph-ico { font-size: 34px; opacity: .7; animation: float 3.4s ease-in-out infinite; }
+        @keyframes float { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-7px); } }
 
+        .livechip {
+            position: absolute; top: 10px; left: 10px; z-index: 6;
+            display: none; align-items: center; gap: 6px;
+            background: rgba(6, 9, 16, 0.72); border: 1px solid rgba(255, 107, 129, 0.5);
+            color: #ffd7dd; border-radius: 999px; padding: 4px 11px;
+            font-size: 10.5px; font-weight: 800; letter-spacing: .14em;
+        }
+        .livechip.show { display: inline-flex; }
+        .livechip i { width: 7px; height: 7px; border-radius: 50%; background: var(--bad); animation: blink 1.1s infinite; }
+        @keyframes blink { 50% { opacity: 0.25; } }
+        .reschip {
+            position: absolute; top: 10px; right: 10px; z-index: 6;
+            background: rgba(6, 9, 16, 0.72); border: 1px solid var(--brd);
+            color: var(--dim); border-radius: 999px; padding: 4px 11px; font-size: 11px;
+            backdrop-filter: none; display: none;
+        }
+        .reschip.show { display: inline-block; }
+        .darkchip {
+            position: absolute; top: 42px; right: 10px; z-index: 6;
+            display: none; background: rgba(6, 9, 16, 0.78);
+            border: 1px solid rgba(255, 200, 87, 0.55);
+            color: #ffe9b8; border-radius: 999px; padding: 4px 11px;
+            font-size: 11px; font-weight: 700;
+        }
+        .darkchip.show { display: inline-block; animation: pulse 2s infinite; }
+
+        .zoombAR {
+            position: absolute; left: 10px; bottom: 10px; z-index: 6;
+            display: flex; gap: 4px; align-items: center;
+            background: rgba(6, 9, 16, 0.7); border: 1px solid var(--brd);
+            border-radius: 999px; padding: 4px 6px;
+            opacity: 0; transition: opacity .25s;
+        }
+        .screen-container:hover .zoombAR { opacity: 1; }
+        .zoombAR button { border: 0; background: transparent; padding: 3px 8px; font-size: 13px; border-radius: 999px; }
+        .zoombAR button:hover { background: rgba(120,140,220,.2); transform: none; }
+        #zoomLabel { font-size: 11px; color: var(--dim); min-width: 40px; text-align: center; font-variant-numeric: tabular-nums; }
+
+        .ripple {
+            position: fixed; width: 34px; height: 34px; margin: -17px 0 0 -17px;
+            border: 2px solid var(--acc2); border-radius: 50%; pointer-events: none; z-index: 50;
+            animation: rip .55s ease-out forwards;
+        }
+        @keyframes rip { from { transform: scale(.35); opacity: 1; } to { transform: scale(2.3); opacity: 0; } }
+
+        .controls { display: grid; grid-template-columns: repeat(4, 1fr); gap: 7px; margin-top: 11px; }
+        .controls button { padding: 11px 4px; font-size: 12px; display: flex; flex-direction: column; gap: 3px; align-items: center; border-radius: 12px; }
+        .controls button .ic { font-size: 16px; transition: transform .18s ease; }
+        .controls button:hover .ic { transform: scale(1.18) translateY(-1px); }
+
+        /* prawy slupek */
+        .kpi { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+        .kpi .cell {
+            background: rgba(8, 11, 22, 0.6); border: 1px solid var(--brd);
+            border-radius: var(--r-sm); padding: 10px 12px;
+            position: relative; overflow: hidden;
+        }
+        .kpi .cell::before {
+            content: ""; position: absolute; top: 0; left: 0; right: 0; height: 2px;
+            background: var(--grad); opacity: .65;
+        }
+        .kpi .cell span { display: block; font-size: 10.5px; color: var(--dim2); letter-spacing: .1em; text-transform: uppercase; }
+        .kpi .cell b { font-size: 19px; font-weight: 750; font-variant-numeric: tabular-nums; }
+
+        #spark { width: 100%; background: rgba(8, 11, 22, 0.6); border: 1px solid var(--brd); border-radius: var(--r-sm); margin-top: 4px; }
+
+        .hint { color: var(--dim2); font-size: 11.5px; margin-top: 10px; text-align: center; line-height: 1.75; }
+        kbd {
+            background: rgba(120,140,220,.12); border: 1px solid var(--brd); border-bottom-width: 2px;
+            border-radius: 5px; padding: 0 5px; font-size: 10.5px; font-family: inherit; color: var(--dim);
+        }
+
+        /* ------------------------------ aplikacje -------------------------- */
+        .appsgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 10px; }
+        .apptile {
+            background: rgba(8, 11, 22, 0.55); border: 1px solid var(--brd); border-radius: 14px;
+            padding: 12px 6px 9px; text-align: center; cursor: pointer;
+            transition: transform .16s, border-color .2s, background .2s;
+        }
+        .apptile:hover { transform: translateY(-3px); border-color: var(--brd-hi); background: rgba(120,140,220,.1); }
+        .apptile:active { transform: translateY(0) scale(.97); }
+        .apptile .av {
+            width: 40px; height: 40px; margin: 0 auto 7px; border-radius: 12px;
+            display: flex; align-items: center; justify-content: center;
+            font-weight: 800; font-size: 17px; color: #fff; text-transform: uppercase;
+        }
+        .apptile .an { font-size: 11px; color: var(--dim); line-height: 1.25; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; word-break: break-word; }
+
+        /* ------------------------------ tabele ----------------------------- */
         table { width: 100%; border-collapse: collapse; font-size: 13px; }
-        th { text-align: left; color: #8b949e; font-weight: 500; padding: 6px 8px; border-bottom: 1px solid #30363d; font-size: 12px; }
-        td { padding: 7px 8px; border-bottom: 1px solid #21262d; }
-        tr:hover td { background: #1c2129; }
-        .st { font-size: 12px; }
-        .st.on { color: #3fb950; } .st.off { color: #8b949e; }
-        .mini { padding: 4px 8px; font-size: 11px; }
-
-        .log { max-height: 220px; overflow-y: auto; font-size: 12px; }
-        .log div { padding: 3px 0; border-bottom: 1px solid #21262d; color: #8b949e; }
-        .log b { color: #c9d1d9; font-weight: 500; }
-
-        #spark { background: #0d1117; border: 1px solid #30363d; border-radius: 6px; margin-top: 8px; }
-        .hint { color: #6e7681; font-size: 11.5px; margin-top: 6px; text-align: center; line-height: 1.55; max-width: 860px; }
-        .toast {
-            position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
-            background: #1f6feb; color: #fff; padding: 8px 16px; border-radius: 999px;
-            font-size: 13px; opacity: 0; transition: opacity .25s; pointer-events: none; z-index: 30;
+        th {
+            text-align: left; color: var(--dim2); font-weight: 700; padding: 8px;
+            border-bottom: 1px solid var(--brd); font-size: 10.5px;
+            letter-spacing: .1em; text-transform: uppercase;
         }
-        .toast.show { opacity: 1; }
+        td { padding: 9px 8px; border-bottom: 1px solid rgba(140,160,230,0.07); }
+        tbody tr { transition: background .15s; }
+        tbody tr:hover { background: rgba(120, 140, 220, 0.07); }
+        .who { display: flex; align-items: center; gap: 9px; }
+        .av-sm {
+            width: 30px; height: 30px; border-radius: 9px; flex: 0 0 auto;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 12px; font-weight: 800; color: #fff; text-transform: uppercase;
+        }
+        .st { font-size: 11.5px; font-weight: 700; display: inline-flex; align-items: center; gap: 6px; }
+        .st.on { color: var(--ok); } .st.off { color: var(--dim2); }
+        .st i { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
 
-        /* Okno PIN */
-        #pinModal { position: fixed; inset: 0; background: rgba(1,4,9,.85); display: none; align-items: center; justify-content: center; z-index: 40; }
-        #pinModal.show { display: flex; }
-        #pinModal .box { background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 24px; width: min(340px, 92vw); text-align: center; }
-        #pinModal h3 { margin: 0 0 8px; color: #58a6ff; }
-        #pinModal p { font-size: 13px; color: #8b949e; margin: 0 0 14px; }
-        #pinErr { color: #f85149; font-size: 12px; min-height: 16px; margin-top: 8px; }
+        /* ------------------------------ log / ustawienia ------------------- */
+        .log { max-height: 240px; overflow-y: auto; font-size: 12.5px; }
+        .log div {
+            padding: 7px 4px 7px 14px; border-bottom: 1px solid rgba(140,160,230,.07);
+            color: var(--dim); position: relative;
+        }
+        .log div::before {
+            content: ""; position: absolute; left: 2px; top: 13px;
+            width: 6px; height: 6px; border-radius: 50%; background: var(--acc);
+            box-shadow: 0 0 8px rgba(108,140,255,.8);
+        }
+        .log b { color: var(--txt); font-weight: 650; font-variant-numeric: tabular-nums; margin-right: 4px; }
+        .empty { text-align: center; color: var(--dim2); padding: 26px 10px; font-size: 13px; }
+        .empty .ic { font-size: 34px; display: block; margin-bottom: 8px; opacity: .65; }
+
+        .info-list { font-size: 13px; color: var(--dim); line-height: 1.85; }
+        .info-list b { color: var(--txt); font-weight: 650; }
+
+        /* ------------------------------ toast / modal ---------------------- */
+        .toast {
+            position: fixed; bottom: 22px; left: 50%;
+            background: rgba(14, 19, 34, 0.92); border: 1px solid var(--brd-hi);
+            color: var(--txt); padding: 10px 20px; border-radius: 999px;
+            font-size: 13.5px; font-weight: 600; opacity: 0; pointer-events: none;
+            transform: translate(-50%, 16px); transition: all .3s cubic-bezier(.2,.7,.3,1);
+            box-shadow: 0 18px 44px -18px rgba(0,0,0,.9); z-index: 30; max-width: 92vw; text-align: center;
+        }
+        .toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+        #pinModal { position: fixed; inset: 0; background: rgba(3, 5, 10, 0.93); display: none; align-items: center; justify-content: center; z-index: 40; }
+        #pinModal.show { display: flex; animation: fadeUp .25s; }
+        #pinModal .box {
+            background: linear-gradient(rgba(16,21,38,.96), rgba(16,21,38,.96)) padding-box, var(--grad3) border-box;
+            border: 1.5px solid transparent; border-radius: 22px; padding: 30px 26px;
+            width: min(360px, 92vw); text-align: center;
+            box-shadow: 0 34px 90px -30px rgba(108, 140, 255, 0.55);
+        }
+        #pinModal .box.shake { animation: shake .4s; }
+        @keyframes shake { 0%,100% { transform: translateX(0); } 20% { transform: translateX(-9px); } 40% { transform: translateX(8px); } 60% { transform: translateX(-5px); } 80% { transform: translateX(4px); } }
+        #pinModal h3 { margin: 10px 0 6px; font-size: 18px; letter-spacing: -.02em; }
+        #pinModal .lockico { font-size: 32px; }
+        #pinModal p { font-size: 13px; color: var(--dim); margin: 0 0 16px; line-height: 1.5; }
+        #pinModal .row { gap: 7px; }
+        #pinErr { color: var(--bad); font-size: 12px; min-height: 17px; margin-top: 9px; font-weight: 600; }
+
+        @media (max-width: 620px) {
+            .controls { grid-template-columns: repeat(3, 1fr); }
+            .tabbtn { padding: 8px 13px; font-size: 12.5px; }
+            h1 { font-size: 19px; }
+            .kpi { grid-template-columns: 1fr 1fr; }
+        }
     </style>
 </head>
 <body>
 
-    <h1>Remote Hub - Panel</h1>
+    <div class="brand">
+        <div class="logo">&#128225;</div>
+        <div style="text-align:left;">
+            <h1>Remote Hub</h1>
+            <small>panel sterowania &middot; na zywo</small>
+        </div>
+    </div>
 
     <div class="badges">
-        <span class="badge"><span id="srvDot" class="dot"></span>Serwer: <b id="srvState">laczenie...</b></span>
-        <span class="badge"><span id="phDot" class="dot"></span>Telefon: <b id="phState">brak</b></span>
-        <span class="badge">FPS: <b id="fps">0</b></span>
-        <span class="badge">Transfer: <b id="kbps">0</b> KB/s</span>
-        <span class="badge">Rozdzielczosc: <b id="resolution">-</b></span>
-        <span class="badge">Kadry: <b id="frames">0</b></span>
+        <span class="badge" id="badgeSrv"><span id="srvDot" class="dot"></span>Serwer <b id="srvState">laczenie...</b></span>
+        <span class="badge" id="badgePh"><span id="phDot" class="dot"></span><b id="phState">brak</b></span>
+        <span class="badge">FPS <b id="fps">0</b></span>
+        <span class="badge">Transfer <b id="kbps">0</b> KB/s</span>
+        <span class="badge" id="badgeRes">Rozdz. <b id="resolution">-</b></span>
+        <span class="badge">Kadry <b id="frames">0</b></span>
+        <span class="badge" id="batBadge" style="display:none;">&#128267; <b id="batVal">-</b></span>
         <span class="badge" id="pinBadge" style="display:none;">&#128274; PIN</span>
     </div>
 
     <div class="tabs">
         <button class="tabbtn active" data-tab="tabPodglad">&#128249; Podglad</button>
-        <button class="tabbtn" data-tab="tabTelefony">&#128241; Telefony</button>
+        <button class="tabbtn" data-tab="tabAplikacje">&#128241; Aplikacje</button>
+        <button class="tabbtn" data-tab="tabTelefony">&#128225; Telefony</button>
         <button class="tabbtn" data-tab="tabUstawienia">&#9881; Ustawienia</button>
     </div>
 
     <!-- ================================================================ -->
     <div class="tab active" id="tabPodglad">
+        <div class="split">
+            <div>
+                <div class="panel" style="margin-bottom:0;">
+                    <div class="screen-container" id="screenBox">
+                        <div id="placeholder"><span class="ph-ico">&#128241;</span><span id="phTxt">Oczekiwanie na polaczenie z telefonem...</span></div>
+                        <img id="screenView" alt="" decoding="async" />
+                        <div class="livechip" id="liveChip"><i></i>LIVE</div>
+                        <div class="reschip" id="resChip"></div>
+                        <div class="darkchip" id="darkChip">&#128164; Ekran zgaszony</div>
+                        <div class="zoombAR">
+                            <button id="btnZoomOut" title="Pomniejsz">&#8722;</button>
+                            <span id="zoomLabel">100%</span>
+                            <button id="btnZoomIn" title="Powieksz">&#43;</button>
+                            <button id="btnZoomFit" title="Dopasuj">Dopasuj</button>
+                        </div>
+                    </div>
+                    <div class="controls">
+                        <button id="btnBack" title="Wstecz (skrot: B)"><span class="ic">&#8592;</span>Wstecz</button>
+                        <button id="btnHome" title="Home (skrot: H)"><span class="ic">&#8962;</span>Home</button>
+                        <button id="btnRecents" title="Ostatnie aplikacje"><span class="ic">&#9776;</span>Appy</button>
+                        <button id="btnLock" title="Blokada ekranu (skrot: L)"><span class="ic">&#128274;</span>Blokada</button>
+                        <button id="btnPower" title="Menu zasilania"><span class="ic">&#9211;</span>Zasilanie</button>
+                        <button id="btnScreenshotPhone" title="Zrzut wykonywany NA telefonie"><span class="ic">&#128190;</span>Zrzut tel.</button>
+                        <button id="btnPause" title="Pauza obrazu (spacja)"><span class="ic">&#10074;&#10074;</span>Pauza</button>
+                        <button id="btnSnap" title="Zapisz aktualny obraz"><span class="ic">&#128247;</span>Pobierz</button>
+                        <button id="btnFs" title="Pelny ekran (skrot: F)"><span class="ic">&#9974;</span>Pelny ekran</button>
+                        <button id="btnKbd" title="Pisz klawiatura komputera prosto na telefon (Esc = wylacz)"><span class="ic">&#9000;</span>Pisanie</button>
+                        <button id="btnAppsShortcut" title="Lista aplikacji na telefonie"><span class="ic">&#128241;</span>Aplikacje</button>
+                        <button id="btnLogShortcut" title="Log zdarzen"><span class="ic">&#128203;</span>Log</button>
+                    </div>
+                    <div class="row" style="margin-top:11px;">
+                        <label>Jakosc:</label>
+                        <select id="qualitySel" title="Jakosc i czestotliwosc wysylania klatek">
+                            <option value="low">Lekka &middot; 8 FPS / 720 px</option>
+                            <option value="medium" selected>Szybka &middot; 15 FPS / 960 px</option>
+                            <option value="high">Bardzo szybka &middot; 24 FPS / 1280 px</option>
+                            <option value="ultra">Maksymalna &middot; 30 FPS / 1600 px</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+
+            <div>
+                <div class="panel" style="margin-bottom:14px;">
+                    <h2>Szybki tekst i schowek</h2>
+                    <div class="row" style="margin-bottom:8px;">
+                        <input type="text" id="quickTxt" placeholder="Napisz cos i wyslij prosto na ekran..." maxlength="300">
+                        <button class="primary" id="btnSendTxt" style="flex:0 0 auto;">Wy&#347;slij</button>
+                    </div>
+                    <div class="row">
+                        <button id="btnClip" style="flex:1;">Skopiuj do schowka telefonu</button>
+                        <button id="btnPasteHint" style="flex:0 0 auto;" title="Jak wkleic?">Jak wkleic?</button>
+                    </div>
+                    <div class="hint" style="text-align:left; margin-top:8px;">
+                        „Wy&#347;slij" wpisuje tekst do <b>otwartego pola</b> na telefonie.
+                        „Schowek" kopiuje - wklejysz <b>dlugim dotknieciem</b> w dowolnym miejscu.
+                    </div>
+                </div>
+
+                <div class="panel" style="margin-bottom:14px;">
+                    <h2>Na zywo <span class="cnt">ostatnie 90 s</span></h2>
+                    <div class="kpi">
+                        <div class="cell"><span>FPS teraz</span><b id="kpiFps" style="color:var(--acc);">0</b></div>
+                        <div class="cell"><span>Transfer</span><b id="kpiKbps" style="color:var(--acc2);">0<span style="font-size:11px;color:var(--dim2);"> KB/s</span></b></div>
+                    </div>
+                    <canvas id="spark" width="480" height="110"></canvas>
+                </div>
+
+                <div class="panel" style="margin-bottom:0;">
+                    <h2>Sesja</h2>
+                    <div class="info-list">
+                        Czas podlaczenia: <b id="sessTime">0 s</b><br>
+                        odebranych klatek: <b id="sessFrames">0</b><br>
+                        transfer: <b id="sessMB">0.0 MB</b><br>
+                        srednie FPS: <b id="sessAvg">0</b>
+                    </div>
+                    <button id="btnRec" class="primary" style="width:100%; margin-top:11px;"
+                            title="Nagrywa obraz z telefonu do pliku wideo (webm)">&#9210; Nagrywaj wideo</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="panel" style="margin-top:14px;">
+            <div class="hint" style="margin-top:0;">
+                <b>Klik</b> = dotkniecie &middot; <b>przeciagnij</b> = swipe &middot; <b>przytrzymaj</b> = long-press &middot;
+                <b>podwojny klik</b> = double-tap &middot; <b>kolo myszy</b> = przewijanie &middot;
+                <b>prawy przycisk</b> = wstecz &middot; <b>Ctrl + kolo</b> = zoom &middot; <b>Shift + ciagnij</b> = przesuwanie obrazu<br>
+                Skroty: <kbd>B</kbd> wstecz &middot; <kbd>H</kbd> home &middot; <kbd>L</kbd> blokada &middot;
+                <kbd>F</kbd> pelny ekran &middot; <kbd>spacja</kbd> pauza<br>
+                Tryb <b>&#9000; Pisanie</b> - co napiszesz na klawiaturze komputera, wchodzi
+                <b>prosto na otwarte pole telefonu</b> (spacja, <kbd>Enter</kbd>, <kbd>Backspace</kbd> tez dzialaja; <kbd>Esc</kbd> wylacza)
+            </div>
+        </div>
+    </div>
+
+    <!-- ================================================================ -->
+    <div class="tab" id="tabAplikacje">
         <div class="panel">
-            <div class="screen-container" id="screenBox">
-                <div id="placeholder">Oczekiwanie na polaczenie z telefonem...</div>
-                <img id="screenView" alt="Brak obrazu z telefonu" />
+            <h2>Aplikacje na telefonie <span class="cnt" id="appsMeta"></span></h2>
+            <div class="row" style="margin-bottom:12px;">
+                <button class="primary" id="btnAppsRefresh">&#8635; Odswiez liste aplikacji</button>
+                <button id="btnAppsHome">&#8962; Wroc do ekranu glownego</button>
             </div>
-            <div class="controls">
-                <button id="btnBack" title="Przycisk Wstecz (skrot: B)">&#8592; Wstecz</button>
-                <button id="btnHome" title="Przycisk Home (skrot: H)">&#8962; Home</button>
-                <button id="btnRecents" title="Lista otwartych aplikacji">&#9776; Appy</button>
-                <button id="btnLock" title="Zablokuj ekran (skrot: L)">&#128274; Blokada</button>
-                <button id="btnPower" title="Menu zasilania">&#9211; Zasilanie</button>
-                <button id="btnScreenshotPhone" title="Zrzut ekranu wykonywany NA telefonie">&#128190; Zrzut na tel.</button>
-                <button id="btnPause" title="Wstrzymaj wyswietlanie obrazu (skrot: spacja)">&#10074;&#10074; Pauza</button>
-                <button id="btnSnap" title="Zapisz aktualny obraz jako JPG">&#128247; Pobierz obraz</button>
-                <button id="btnFs" title="Pelny ekran (skrot: F)">&#9974; Pelny ekran</button>
+            <div class="appsgrid" id="appsGrid">
+                <div class="empty" style="grid-column:1/-1;"><span class="ic">&#128241;</span>
+                    Kliknij „Odswiez liste" - telefon odesle liste zainstalowanych aplikacji.<br>
+                    <span style="font-size:11.5px;">(wymaga apki Remote Control 1.5 + wlaczonego zdalnego sterowania)</span>
+                </div>
             </div>
-            <div class="row" style="margin-top:10px;">
-                <label>Jakosc:</label>
-                <select id="qualitySel" title="Jakosc i czestotliwosc wysylania klatek">
-                    <option value="low">Niska - 5 FPS / mala rozdzielczosc</option>
-                    <option value="medium" selected>Srednia - 10 FPS / 960 px</option>
-                    <option value="high">Wysoka - 15 FPS / 1280 px</option>
-                    <option value="ultra">Bardzo wysoka - 20 FPS / pelna</option>
-                </select>
-            </div>
-            <canvas id="spark" width="820" height="54"></canvas>
-            <div class="hint" style="margin-top:4px;">
-                <b>Klik</b> = dotkniecie. <b>Przeciagniecie</b> = swipe. <b>Przytrzymaj</b> = przytrzymanie palca.
-                Skroty: <b>B</b> wstecz, <b>H</b> home, <b>L</b> blokada, <b>F</b> pelny ekran, <b>spacja</b> pauza.
+        </div>
+        <div class="panel">
+            <h2>Jak to dziala</h2>
+            <div class="info-list">
+                Klikniecie kafelka <b>uruchamia aplikacje na telefonie</b> i przelacza do podgladu.
+                Lista jest pobierana na zyczenie (nie obciaza baterii ani sieci).
+                Pierwsza litera w kolorowym kafelku to skrot nazwy aplikacji.
             </div>
         </div>
     </div>
@@ -423,35 +780,34 @@ html_content = """
     <div class="tab" id="tabTelefony">
         <div class="panel">
             <h2>Wybierz telefon do podgladu</h2>
-            <div class="row" style="margin-bottom:8px;">
+            <div class="row" style="margin-bottom:9px;">
                 <label>Telefon:</label>
                 <select id="phoneSel" title="Wybierz urzadzenie do podgladu">
                     <option value="auto">Automatycznie (najaktywniejszy)</option>
                 </select>
             </div>
             <div class="row">
-                <label>Nazwa:</label>
                 <button id="btnRename" title="Nadaj wlasna nazwe wybranemu telefonowi">Zmien nazwe wybranego</button>
             </div>
         </div>
         <div class="panel">
-            <h2>Wszystkie telefony z zainstalowana apka</h2>
+            <h2>Wszystkie telefony z apka <span class="cnt" id="phonesCnt"></span></h2>
             <table>
                 <thead>
-                    <tr><th>Model</th><th>Nazwa</th><th>Status</th><th>Ostatnio widziany</th><th></th></tr>
+                    <tr><th>Telefon</th><th>Nazwa</th><th>Status</th><th>Bateria</th><th>Ostatnio</th><th></th></tr>
                 </thead>
                 <tbody id="phoneTable">
-                    <tr><td colspan="5" style="color:#484f58;">Ladowanie...</td></tr>
+                    <tr><td colspan="6"><div class="empty"><span class="ic">&#128241;</span>Ladowanie...</div></td></tr>
                 </tbody>
             </table>
         </div>
         <div class="panel">
-            <h2>Co tu dziala?</h2>
-            <div style="font-size:13px; color:#8b949e; line-height:1.6;">
-                Kazdy telefon z zainstalowana apka <b>Remote Control</b> pojawia sie na tej liscie -
-                takze wylaczony (z czasem ostatniego widzenia). Nazwy (np. "Telefon taty")
-                widza wszystkie przegladarki laczące sie do panelu.<br>
+            <h2>Co tu dziala</h2>
+            <div class="info-list">
+                Kazdy telefon z zainstalowana apka <b>Remote Control</b> pojawia sie na liscie - takze wylaczony
+                (z czasem ostatniego widzenia). Nazwy (np. „Telefon taty") widza wszystkie przegladarki.
                 <b>Obserwuj</b> - podglada wybrany telefon. <b>Automatycznie</b> - zawsze najaktywniejszy.
+                Kolumna <b>Bateria</b> pokazuje stan na zywo (apka raportuje co 5 s).
             </div>
         </div>
     </div>
@@ -459,42 +815,32 @@ html_content = """
     <!-- ================================================================ -->
     <div class="tab" id="tabUstawienia">
         <div class="panel">
-            <h2>Kod dostepu do panelu (PIN)</h2>
-            <div style="font-size:12.5px; color:#8b949e; margin-bottom:10px; line-height:1.55;">
-                Chroni podglad kodem - bez niego nikt nie zobaczy ekranu ani nie polaczy sie z telefonem.
-                Dziala tylko gdy na serwerze (Render) ustawiono zmienna <b>ACCESS_PIN</b>.
-                Aplikacja na telefonie tez wysyla ten kod (pole PIN w ustawieniach apki).
+            <h2>&#128274; Kod dostepu do panelu (PIN)</h2>
+            <div class="info-list" style="font-size:12.5px; line-height:1.6; margin-bottom:11px;">
+                Panel chroni podglad kodem - bez niego nikt nie zobaczy ekranu ani nie polaczy sie z telefonem.
+                Aplikacja na telefonie tez wysyla ten kod (sekcja PIN w ustawieniach apki).
             </div>
             <div class="row">
                 <label>PIN:</label>
                 <input type="password" id="pinSetting" placeholder="kod dostepu do panelu" maxlength="32">
-                <button id="btnPinSave" style="flex:0 0 auto;">Zapisz i wyslij</button>
+                <button class="primary" id="btnPinSave" style="flex:0 0 auto;">Zapisz i wyslij</button>
             </div>
-            <div id="pinStatus" style="font-size:12px; color:#8b949e; margin-top:8px;">PIN nieustawiony / brak zabezpieczenia.</div>
-        </div>
-
-        <div class="panel">
-            <h2>Sesja</h2>
-            <div style="font-size:13px; color:#8b949e; line-height:1.7;">
-                Czas podlaczenia: <b id="sessTime" style="color:#c9d1d9;">0 s</b><br>
-                odebranych klatek: <b id="sessFrames" style="color:#c9d1d9;">0</b> &nbsp;|&nbsp;
-                transfer: <b id="sessMB" style="color:#c9d1d9;">0.0</b> MB &nbsp;|&nbsp;
-                srednie FPS: <b id="sessAvg" style="color:#c9d1d9;">0</b>
-            </div>
+            <div id="pinStatus" style="font-size:12px; color:var(--dim); margin-top:9px;">Sprawdzanie...</div>
         </div>
 
         <div class="panel">
             <h2>Log zdarzen</h2>
-            <div class="log" id="eventLog"><div style="color:#484f58;">Brak zdarzen.</div></div>
+            <div class="log" id="eventLog"><div>Brak zdarzen.</div></div>
         </div>
 
         <div class="panel">
             <h2>Informacje</h2>
-            <div style="font-size:12.5px; color:#8b949e; line-height:1.7;">
-                Serwer: <b id="srvUrl" style="color:#c9d1d9;"></b><br>
-                Panel: Remote Hub v5 &nbsp;|&nbsp; apka: Remote Control v1.4+<br>
-                Sterowanie: tap / swipe / przytrzymanie dzialaja po wlaczeniu uslugi
-                <b>Remote Control</b> w telefonie (Ustawienia &rarr; Dostepnosc).
+            <div class="info-list">
+                Serwer: <b id="srvUrl"></b><br>
+                Panel: <b>Remote Hub v6</b> &middot; apka: <b>Remote Control v1.5+</b><br>
+                Sterowanie dziala po wlaczeniu uslugi <b>Remote Control</b> w telefonie
+                (Ustawienia &rarr; Dostepnosc).<br>
+                Skroty klawiszy: <kbd>B</kbd> <kbd>H</kbd> <kbd>L</kbd> <kbd>F</kbd> <kbd>spacja</kbd>
             </div>
         </div>
     </div>
@@ -503,12 +849,13 @@ html_content = """
 
     <!-- Okno PIN -->
     <div id="pinModal">
-        <div class="box">
-            <h3>&#128274; Panel zabezpieczony</h3>
-            <p>Podaj kod dostepu, aby zobaczyc podglad ekranu telefonu.</p>
+        <div class="box" id="pinBox">
+            <div class="lockico">&#128274;</div>
+            <h3>Panel zabezpieczony</h3>
+            <p>Podaj kod dostepu, aby zobaczyc podglad ekranu telefonu i przejac sterowanie.</p>
             <div class="row">
-                <input type="password" id="pinInput" placeholder="PIN" maxlength="32">
-                <button id="pinSend" style="flex:0 0 auto;">OK</button>
+                <input type="password" id="pinInput" placeholder="Kod dostepu" maxlength="32">
+                <button class="primary" id="pinSend" style="flex:0 0 auto;">Wejdz</button>
             </div>
             <div id="pinErr"></div>
         </div>
@@ -535,12 +882,17 @@ html_content = """
         var quality = localStorage.getItem("rh_quality") || "medium";
         var toastTimer = null;
         var histFps = [], histKbps = [];
+        var appsList = null, appsRequestedAt = 0;
+        var rec = null, recChunks = [], recStart = 0, recCanvas = null, recCtx = null;
+        var darkCanvas = document.createElement("canvas");
+        darkCanvas.width = 24; darkCanvas.height = 24;
+        var darkCtx = darkCanvas.getContext("2d", { willReadFrequently: true });
 
         var QUALITIES = {
-            low:    { fps: 5,  q: 25, max: 640  },
-            medium: { fps: 10, q: 35, max: 960  },
-            high:   { fps: 15, q: 45, max: 1280 },
-            ultra:  { fps: 20, q: 55, max: 1920 }
+            low:    { fps: 8,  q: 30, max: 720  },
+            medium: { fps: 15, q: 36, max: 960  },
+            high:   { fps: 24, q: 42, max: 1280 },
+            ultra:  { fps: 30, q: 50, max: 1600 }
         };
 
         qualitySel.value = QUALITIES[quality] ? quality : "medium";
@@ -549,27 +901,29 @@ html_content = """
         function setPhone(state, on) { phState.textContent = state; phDot.className = "dot " + (on ? "on" : "off"); }
         function toast(msg) {
             toastEl.textContent = msg; toastEl.className = "toast show";
-            clearTimeout(toastTimer); toastTimer = setTimeout(function(){ toastEl.className = "toast"; }, 1600);
+            clearTimeout(toastTimer); toastTimer = setTimeout(function () { toastEl.className = "toast"; }, 1900);
         }
         function send(obj) {
             if (ws && ws.readyState === 1) { ws.send(JSON.stringify(obj)); return true; }
             return false;
         }
+        function hue(s) { var h = 0; for (var i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) % 360; return h; }
 
         // ------------------------------------------------------------------
         // Zakladki
         // ------------------------------------------------------------------
         document.querySelectorAll(".tabbtn").forEach(function (b) {
-            b.addEventListener("click", function () {
-                document.querySelectorAll(".tabbtn").forEach(function (x) { x.classList.remove("active"); });
-                document.querySelectorAll(".tab").forEach(function (x) { x.classList.remove("active"); });
-                b.classList.add("active");
-                document.getElementById(b.dataset.tab).classList.add("active");
-            });
+            b.addEventListener("click", function () { gotoTab(b.dataset.tab, true); });
         });
-        function gotoTab(id) {
+        function gotoTab(id, scroll) {
             var btn = document.querySelector('.tabbtn[data-tab="' + id + '"]');
-            if (btn) btn.click();
+            if (!btn) return;
+            document.querySelectorAll(".tabbtn").forEach(function (x) { x.classList.remove("active"); });
+            document.querySelectorAll(".tab").forEach(function (x) { x.classList.remove("active"); });
+            btn.classList.add("active");
+            document.getElementById(id).classList.add("active");
+            if (id === "tabAplikacje" && appsList === null && !appsRequestedAt) requestApps();
+            if (scroll !== false) window.scrollTo({ top: 0, behavior: "smooth" });
         }
 
         // ------------------------------------------------------------------
@@ -587,7 +941,6 @@ html_content = """
                 authed = !pinRequired;
                 setServer("polaczony", true);
                 if (!Object.keys(phones).length) setPhone("czekam...", false);
-                // Gdy znamy PIN z poprzedniego razu - probuj od razu.
                 var saved = localStorage.getItem("rh_pin");
                 if (pinRequired && saved) send({ t: "auth", pin: saved });
                 sendView();
@@ -632,10 +985,9 @@ html_content = """
                 showPinModal(false);
             } else if (msg.t === "auth") {
                 if (msg.ok) {
-                    authed = true;
-                    hidePinModal();
-                    toast("Zalogowano do panelu");
-                    sendView();
+                    authed = true; hidePinModal();
+                    toast("Zalogowano - panel odblokowany");
+                    sendView(); sendQuality();
                 } else {
                     authed = false;
                     localStorage.removeItem("rh_pin");
@@ -643,6 +995,30 @@ html_content = """
                 }
             } else if (msg.t === "hello") {
                 send({ t: "phones" });
+            } else if (msg.t === "stat") {
+                if (msg.w && msg.h) setResolution(msg.w + " x " + msg.h);
+                // aktywny telefon widac od razu - nawet zanim serwer odswiezy liste
+                if (msg.id && !phones[msg.id]) {
+                    phones[msg.id] = { id: msg.id, model: msg.device || ("Telefon " + msg.id), name: null,
+                                       online: true, since: 0, frames: 0, bat: null };
+                    renderPhones();
+                } else if (msg.id && phones[msg.id] && !phones[msg.id].online) {
+                    phones[msg.id].online = true;
+                    phones[msg.id].since = 0;
+                    renderPhones();
+                }
+                if (typeof msg.bat === "number") {
+                    if (msg.id && phones[msg.id] && phones[msg.id].bat !== msg.bat) {
+                        phones[msg.id].bat = msg.bat;
+                        renderPhones();
+                    }
+                    showBattery(msg.bat);
+                }
+            } else if (msg.t === "apps") {
+                appsList = Array.isArray(msg.list) ? msg.list : [];
+                appsRequestedAt = 0;
+                renderApps();
+                toast("Odebrano liste: " + appsList.length + " aplikacji");
             } else if (msg.t === "error") {
                 toast("Serwer: " + (msg.m || "blad"));
             }
@@ -656,8 +1032,13 @@ html_content = """
             pinModal.classList.add("show");
             document.getElementById("pinErr").textContent =
                 wrong ? "Bledny kod - sprobuj jeszcze raz." : "";
-            var inp = document.getElementById("pinInput");
-            if (!wrong) { inp.value = ""; inp.focus(); }
+            if (wrong) {
+                var box = document.getElementById("pinBox");
+                box.classList.remove("shake"); void box.offsetWidth; box.classList.add("shake");
+            } else {
+                var inp = document.getElementById("pinInput");
+                inp.value = ""; inp.focus();
+            }
         }
         function hidePinModal() { pinModal.classList.remove("show"); }
         function tryPin() {
@@ -679,9 +1060,9 @@ html_content = """
         });
         function updatePinStatus() {
             var el = document.getElementById("pinStatus");
-            if (!pinRequired) el.textContent = "Serwer bez zabezpieczenia - podglad otwarty dla kazdego, kto zna adres.";
+            if (!pinRequired) el.textContent = "Serwer dziala bez zabezpieczenia - podglad otwarty.";
             else if (authed) el.textContent = "Zalogowano - podglad chroniony PINEM.";
-            else el.textContent = "Serwer wymaga PIN - podaj go powyzej.";
+            else el.textContent = "Serwer wymaga PIN - podaj go w okienku logowania.";
         }
 
         // ------------------------------------------------------------------
@@ -693,18 +1074,47 @@ html_content = """
             if (s < 172800) return Math.round(s / 3600) + " godz. temu";
             return Math.round(s / 86400) + " dni temu";
         }
+        function initials(s) {
+            var parts = String(s || "?").replace(/[^A-Za-z0-9 ]/g, " ").trim().split(/\s+/);
+            return ((parts[0] || "?")[0] || "?") + ((parts[1] || "")[0] || "");
+        }
+        function showBattery(pct) {
+            var b = document.getElementById("batBadge");
+            if (typeof pct === "number" && pct >= 0) {
+                document.getElementById("batVal").textContent = pct + "%";
+                b.style.display = "";
+                b.classList.toggle("hot", pct <= 20);
+            } else b.style.display = "none";
+        }
 
         function renderPhones() {
             var current = phoneSel.value || "auto";
-            var html = '<option value="auto">Automatycznie (najaktywniejszy)</option>';
             var ids = Object.keys(phones);
-            ids.forEach(function (id) {
+            // przebudowujemy liste wyboru TYLKO gdy sie cos zmienilo - dzieki temu
+            // odswiezanie co 5 s nie zamyka listy, gdy wlasciwie wybierasz telefon.
+            var selKey = ids.map(function (id) {
                 var p = phones[id];
-                var label = (p.name || p.model) +
-                    (p.online ? " - online" : " - offline, widziany " + fmtSince(p.since));
-                html += '<option value="' + id + '">' + label + '</option>';
-            });
-            phoneSel.innerHTML = html;
+                return id + "|" + (p.online ? 1 : 0) + "|" + (p.name || "") + "|" + p.model + "|" + (p.bat == null ? "" : p.bat);
+            }).join(";");
+            if (selKey !== phoneSel._key) {
+                phoneSel._key = selKey;
+                var html = '<option value="auto">Automatycznie (najaktywniejszy)</option>';
+                var act = [], off = [];
+                ids.forEach(function (id) { (phones[id].online ? act : off).push(id); });
+                function opts(list) {
+                    var s = "";
+                    list.forEach(function (id) {
+                        var p = phones[id];
+                        var label = (p.name || p.model) + (typeof p.bat === "number" ? " \u{1F50B} " + p.bat + "%" : "") +
+                            (p.online ? "  \u{1F7E2} aktywny teraz" : "  \u{1F534} offline, widziany " + fmtSince(p.since));
+                        s += '<option value="' + id + '">' + label + "</option>";
+                    });
+                    return s;
+                }
+                if (act.length) html += '<optgroup label="Aktywne teraz">' + opts(act) + "</optgroup>";
+                if (off.length) html += '<optgroup label="Zapisane (offline)">' + opts(off) + "</optgroup>";
+                phoneSel.innerHTML = html;
+            }
 
             var valid = current === "auto" || phones[current];
             phoneSel.value = valid ? current : "auto";
@@ -717,8 +1127,10 @@ html_content = """
             } else {
                 var shown = selectedPhone === "auto" ? autoPhoneId : selectedPhone;
                 var p2 = phones[shown];
-                setPhone(p2 ? (p2.online ? (p2.name || p2.model) : (p2.name || p2.model) + " (offline)") : "brak", !!(p2 && p2.online));
+                setPhone(p2 ? (p2.name || p2.model) + (p2.online ? "" : " (offline)") : "brak", !!(p2 && p2.online));
+                showBattery(p2 ? p2.bat : null);
             }
+            document.getElementById("phonesCnt").textContent = ids.length + " w spisie";
             renderPhoneTable();
         }
 
@@ -726,21 +1138,25 @@ html_content = """
             var tb = document.getElementById("phoneTable");
             var ids = Object.keys(phones);
             if (!ids.length) {
-                tb.innerHTML = '<tr><td colspan="5" style="color:#484f58;">' +
-                    'Jeszcze zaden telefon nie polaczyl sie z tym serwerem.</td></tr>';
+                tb.innerHTML = '<tr><td colspan="6"><div class="empty"><span class="ic">&#128241;</span>' +
+                    "Jeszcze zaden telefon nie polaczyl sie z tym serwerem.</div></td></tr>";
                 return;
             }
             var rows = "";
             ids.forEach(function (id) {
                 var p = phones[id];
+                var nm = p.name || p.model;
                 rows += "<tr>" +
-                    "<td>" + p.model + "</td>" +
-                    "<td>" + (p.name || "<span style='color:#484f58;'>-</span>") + "</td>" +
-                    '<td><span class="st ' + (p.online ? "on" : "off") + '">' +
-                    (p.online ? "&#9679; online" : "&#9675; offline") + "</span></td>" +
+                    '<td><div class="who"><div class="av-sm" style="background:linear-gradient(135deg,hsl(' +
+                    hue(nm) + ",70%,55%),hsl(" + (hue(nm) + 60) + ',70%,45%));">' + initials(nm) + "</div>" +
+                    "<div>" + p.model + (p.name ? '<div style="font-size:11px;color:var(--dim2);">' + p.name + "</div>" : "") + "</div></div></td>" +
+                    "<td>" + (p.name || "<span style='color:var(--dim2);'>-</span>") + "</td>" +
+                    '<td><span class="st ' + (p.online ? "on" : "off") + '"><i></i>' +
+                    (p.online ? "online" : "offline") + "</span></td>" +
+                    "<td>" + (typeof p.bat === "number" ? "\u{1F50B} " + p.bat + "%" : "<span style='color:var(--dim2);'>-</span>") + "</td>" +
                     "<td>" + (p.online ? "nadaje teraz" : fmtSince(p.since)) + "</td>" +
                     '<td style="text-align:right; white-space:nowrap;">' +
-                    '<button class="mini" data-watch="' + id + '">Obserwuj</button> ' +
+                    '<button class="mini primary" data-watch="' + id + '">Obserwuj</button> ' +
                     '<button class="mini" data-rename="' + id + '">Nazwa</button>' +
                     "</td></tr>";
             });
@@ -751,7 +1167,8 @@ html_content = """
                     localStorage.setItem("rh_phone", selectedPhone);
                     phoneSel.value = selectedPhone;
                     sendView(); renderPhones();
-                    toast("Obserwuje: " + (phones[selectedPhone] ? (phones[selectedPhone].name || phones[selectedPhone].model) : ""));
+                    var p = phones[selectedPhone];
+                    toast("Obserwuje: " + (p ? (p.name || p.model) : ""));
                     gotoTab("tabPodglad");
                 });
             });
@@ -768,14 +1185,14 @@ html_content = """
 
         function renderEvents(evts) {
             var el = document.getElementById("eventLog");
-            if (!evts.length) {
-                el.innerHTML = "<div style='color:#484f58;'>Brak zdarzen.</div>";
-                return;
-            }
+            var key = evts.map(function (e) { return e.ts + "|" + e.text; }).join("~");
+            if (key === el._key) return;   // nic sie nie zmienilo - nie kasujemy przewijenia
+            el._key = key;
+            if (!evts.length) { el.innerHTML = "<div>Brak zdarzen.</div>"; return; }
             var html = "";
             evts.slice().reverse().forEach(function (e) {
                 var t = new Date(e.ts * 1000).toLocaleTimeString("pl-PL");
-                html += "<div><b>" + t + "</b> - " + e.text + "</div>";
+                html += "<div><b>" + t + "</b>" + e.text + "</div>";
             });
             el.innerHTML = html;
         }
@@ -790,10 +1207,7 @@ html_content = """
         function sendView() { send({ t: "view", id: selectedPhone === "auto" ? null : selectedPhone }); }
 
         document.getElementById("btnRename").addEventListener("click", function () {
-            if (selectedPhone === "auto" || !phones[selectedPhone]) {
-                toast("Najpierw wybierz telefon z listy");
-                return;
-            }
+            if (selectedPhone === "auto" || !phones[selectedPhone]) { toast("Najpierw wybierz telefon z listy"); return; }
             var p = phones[selectedPhone];
             var name = prompt("Nazwa tego telefonu (pusta = pokazuj model):", p.name || p.model || "");
             if (name === null) return;
@@ -812,24 +1226,33 @@ html_content = """
             quality = qualitySel.value;
             localStorage.setItem("rh_quality", quality);
             sendQuality();
-            toast("Ustawiono jakosc: " + qualitySel.options[qualitySel.selectedIndex].text);
+            toast("Jakosc: " + qualitySel.options[qualitySel.selectedIndex].text);
         });
 
         // ------------------------------------------------------------------
-        // Obraz + wykres + statystyki sesji
+        // Obraz: ramki, LIVE, wykres, sesja
         // ------------------------------------------------------------------
+        function setResolution(r) {
+            resEl.textContent = r;
+            var c = document.getElementById("resChip");
+            c.textContent = r; c.classList.add("show");
+        }
         function showFrame(src, bytes) {
             frameCount++; totalFrames++; sessFrames++;
             lastFrameAt = Date.now();
             byteWindow += bytes || 0; totalBytes += bytes || 0;
             framesEl.textContent = totalFrames;
-            if (paused) return;
+            if (paused || document.hidden) return;   // ukryta karta nie dekoduje klatek (mniej lagow)
             if (lastObjectUrl) { URL.revokeObjectURL(lastObjectUrl); lastObjectUrl = null; }
             if (src.indexOf("blob:") === 0) lastObjectUrl = src;
             screenView.src = src;
             screenView.style.display = "block";
             placeholder.style.display = "none";
             setPhone(textOfSelected(), true);
+            if (rec && recCtx) {
+                // rysujemy biezaca klatke na kanwie nagrywania (z opoznieniem 1 klatki)
+                try { recCtx.drawImage(screenView, 0, 0, recCanvas.width, recCanvas.height); } catch (ignored) {}
+            }
         }
         function textOfSelected() {
             var id = selectedPhone === "auto" ? autoPhoneId : selectedPhone;
@@ -839,22 +1262,41 @@ html_content = """
 
         var spark = document.getElementById("spark"), sctx = spark.getContext("2d");
         function drawSpark() {
-            sctx.clearRect(0, 0, spark.width, spark.height);
-            sctx.font = "10px sans-serif";
-            function line(arr, color, maxV, label) {
-                sctx.strokeStyle = color; sctx.beginPath();
+            var W = spark.width, H = spark.height;
+            sctx.clearRect(0, 0, W, H);
+            sctx.font = "600 10px ui-sans-serif, system-ui, sans-serif";
+            function series(arr, color, maxV, label, unit, top) {
                 var n = arr.length;
+                if (!n) return;
+                var pts = [];
                 for (var i = 0; i < n; i++) {
-                    var x = spark.width - (n - i) * (spark.width / 90);
-                    var y = spark.height - 4 - Math.min(1, arr[i] / maxV) * (spark.height - 12);
-                    if (i === 0) sctx.moveTo(x, y); else sctx.lineTo(x, y);
+                    var x = (i / 89) * (W - 60) + 54;
+                    var y = H - 8 - Math.min(1, arr[i] / maxV) * (H - 30);
+                    pts.push([x, y]);
                 }
-                sctx.stroke();
+                // wypelnienie gradientem
+                var g = sctx.createLinearGradient(0, 0, 0, H);
+                g.addColorStop(0, color.replace("rgb", "rgba").replace(")", ",0.30)"));
+                g.addColorStop(1, color.replace("rgb", "rgba").replace(")", ",0.00)"));
+                sctx.beginPath();
+                sctx.moveTo(pts[0][0], H - 8);
+                pts.forEach(function (p) { sctx.lineTo(p[0], p[1]); });
+                sctx.lineTo(pts[pts.length - 1][0], H - 8);
+                sctx.closePath();
+                sctx.fillStyle = g; sctx.fill();
+                // linia
+                sctx.beginPath();
+                pts.forEach(function (p, i) { i ? sctx.lineTo(p[0], p[1]) : sctx.moveTo(p[0], p[1]); });
+                sctx.strokeStyle = color; sctx.lineWidth = 1.8; sctx.stroke();
+                // kropka na koncu
+                var lastp = pts[pts.length - 1];
+                sctx.beginPath(); sctx.arc(lastp[0], lastp[1], 3, 0, 7); sctx.fillStyle = color; sctx.fill();
+                // etykieta
                 sctx.fillStyle = color;
-                sctx.fillText(label + " " + (n ? arr[n - 1] : 0), 4, 10 + (color === "#58a6ff" ? 0 : 12));
+                sctx.fillText(label + " " + (arr[n - 1]) + unit, 6, top);
             }
-            line(histFps, "#58a6ff", 30, "FPS");
-            line(histKbps, "#3fb950", 2048, "KB/s");
+            series(histFps, "rgb(108,140,255)", 30, "FPS", "", 13);
+            series(histKbps, "rgb(55,230,192)", 2048, "Transfer", " KB/s", 28);
         }
 
         setInterval(function () {
@@ -864,6 +1306,8 @@ html_content = """
             kbps = Math.round(byteWindow / 1024); byteWindow = 0;
             histKbps.push(kbps); if (histKbps.length > 90) histKbps.shift();
             kbpsEl.textContent = kbps;
+            document.getElementById("kpiFps").textContent = histFps.length ? histFps[histFps.length - 1] : 0;
+            document.getElementById("kpiKbps").innerHTML = kbps + '<span style="font-size:11px;color:var(--dim2);"> KB/s</span>';
             drawSpark();
 
             var secs = Math.round((Date.now() - sessStart) / 1000);
@@ -873,46 +1317,115 @@ html_content = """
             document.getElementById("sessMB").textContent = (totalBytes / 1048576).toFixed(1);
             document.getElementById("sessAvg").textContent = sessFrames && secs ? Math.round(sessFrames / secs) : 0;
 
+            var live = lastFrameAt && Date.now() - lastFrameAt < 2000;
+            document.getElementById("liveChip").classList.toggle("show", !!live && !paused);
+            document.getElementById("screenBox").classList.toggle("live", !!live && !paused);
+            document.getElementById("darkChip").classList.toggle(
+                "show", !!live && !paused && screenView.style.display === "block" && isScreenDark());
+
             if (lastFrameAt && Date.now() - lastFrameAt > 3000 && !paused) {
                 setPhone(Object.keys(phones).length ? "brak obrazu" : "brak", false);
-                if (Object.keys(phones).length) placeholder.textContent = "Telefon nie wysyla obrazu...";
+                if (Object.keys(phones).length) document.getElementById("phTxt").textContent = "Telefon nie wysyla obrazu - sprawdz apke na telefonie...";
             }
         }, 1000);
 
         screenView.onload = function () {
-            if (screenView.naturalWidth) resEl.textContent = screenView.naturalWidth + " x " + screenView.naturalHeight;
+            if (screenView.naturalWidth) setResolution(screenView.naturalWidth + " x " + screenView.naturalHeight);
+            fitContainer();
         };
+        function fitContainer() {
+            // kontener dopasowany do proporcji obrazu - telefon zawsze widac w calosci
+            var box = document.getElementById("screenBox");
+            if (document.fullscreenElement === box) { box.style.height = ""; return; }
+            var maxH = Math.max(240, window.innerHeight - 330);
+            var nw = screenView.naturalWidth, nh = screenView.naturalHeight, h = maxH;
+            if (nw && nh && box.clientWidth) h = Math.min(maxH, Math.round(box.clientWidth * nh / nw));
+            box.style.height = Math.max(240, h) + "px";
+        }
+        window.addEventListener("resize", fitContainer);
+        document.addEventListener("fullscreenchange", fitContainer);
 
         // ------------------------------------------------------------------
-        // Sterowanie: klik = tap, przeciągnięcie = swipe, przytrzymanie = hold
+        // Sterowanie: mysz (klik / swipe / long-press / dbl / kolo / prawy / zoom)
         // ------------------------------------------------------------------
         var dragStart = null, dragging = false, holdTimer = null, holdDone = false;
-        function norm(e) {
+        var lastTap = { t: 0, x: 0, y: 0 }, dblDone = false;
+        var zoom = 1, panX = 0, panY = 0, panning = false, panLast = null, panMoved = false;
+
+        function contentRect() {
+            // faktyczny obszar obrazu w kontenerze (object-fit: contain - moga byc pasy)
             var r = screenView.getBoundingClientRect();
+            var nw = screenView.naturalWidth, nh = screenView.naturalHeight;
+            if (!nw || !nh || !r.width || !r.height) return r;
+            var s = Math.min(r.width / nw, r.height / nh);
+            var cw = nw * s, ch = nh * s;
+            return { left: r.left + (r.width - cw) / 2, top: r.top + (r.height - ch) / 2,
+                     width: cw, height: ch };
+        }
+        function norm(e) {
+            var r = contentRect();
             return {
                 x: Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)),
                 y: Math.max(0, Math.min(1, (e.clientY - r.top) / r.height))
             };
         }
+        function r4(v) { return Math.round(v * 10000) / 10000; }
+        function ripple(cx, cy) {
+            var el = document.createElement("div");
+            el.className = "ripple";
+            el.style.left = cx + "px"; el.style.top = cy + "px";
+            document.body.appendChild(el);
+            setTimeout(function () { el.remove(); }, 600);
+        }
+        function applyView() {
+            screenView.style.transform =
+                (zoom === 1 && panX === 0 && panY === 0) ? "none" :
+                "translate(" + panX + "px," + panY + "px) scale(" + zoom + ")";
+            document.getElementById("zoomLabel").textContent = Math.round(zoom * 100) + "%";
+        }
+        function setZoom(z) {
+            zoom = Math.max(1, Math.min(4, z));
+            if (zoom === 1) { panX = 0; panY = 0; }
+            applyView();
+        }
+
         screenView.addEventListener("mousedown", function (e) {
-            dragStart = norm(e); dragging = false; holdDone = false;
+            // przesuwanie obrazu: srodkowy LUB shift + ciagniecie
+            if (e.button === 1 || (e.button === 0 && e.shiftKey)) {
+                e.preventDefault();
+                panning = true; panMoved = false; panLast = { x: e.clientX, y: e.clientY };
+                return;
+            }
+            if (e.button !== 0) return;
+            dragStart = norm(e); dragging = false; holdDone = false; dblDone = false;
             var p = dragStart;
             holdTimer = setTimeout(function () {
                 if (dragStart && !dragging) {
                     send({ t: "longpress", x: r4(p.x), y: r4(p.y) });
                     holdDone = true;
+                    ripple(e.clientX, e.clientY);
                     toast("Przytrzymanie");
                 }
-            }, 550);
+            }, 520);
         });
-        screenView.addEventListener("mousemove", function (e) {
+        window.addEventListener("mousemove", function (e) {
+            if (panning) {
+                panMoved = true;
+                panX += e.clientX - panLast.x;
+                panY += e.clientY - panLast.y;
+                panLast = { x: e.clientX, y: e.clientY };
+                applyView();
+                return;
+            }
             if (!dragStart) return;
             var p = norm(e);
-            var dx = (p.x - dragStart.x) * screenView.getBoundingClientRect().width;
-            var dy = (p.y - dragStart.y) * screenView.getBoundingClientRect().height;
-            if (Math.sqrt(dx * dx + dy * dy) > 14) { dragging = true; clearTimeout(holdTimer); }
+            var r = contentRect();
+            var dx = (p.x - dragStart.x) * r.width;
+            var dy = (p.y - dragStart.y) * r.height;
+            if (Math.sqrt(dx * dx + dy * dy) > 12) { dragging = true; clearTimeout(holdTimer); }
         });
         window.addEventListener("mouseup", function (e) {
+            if (panning) { panning = false; return; }
             clearTimeout(holdTimer);
             if (!dragStart) return;
             var end = norm(e), start = dragStart;
@@ -920,12 +1433,55 @@ html_content = """
             if (holdDone) { holdDone = false; return; }
             if (dragging) {
                 send({ t: "swipe", x1: r4(start.x), y1: r4(start.y), x2: r4(end.x), y2: r4(end.y) });
+                ripple(e.clientX, e.clientY);
                 toast("Swipe");
+                dragging = false;
+                return;
+            }
+            // klik: wykrywanie podwojnego klikniecia
+            var now = Date.now();
+            var isDbl = (now - lastTap.t < 350) &&
+                Math.abs(end.x - lastTap.x) < 0.06 && Math.abs(end.y - lastTap.y) < 0.06;
+            if (isDbl) {
+                send({ t: "dblclick", x: r4(end.x), y: r4(end.y) });
+                lastTap.t = 0;
+                ripple(e.clientX, e.clientY);
+                toast("Podwojny klik");
             } else {
                 send({ t: "tap", x: r4(end.x), y: r4(end.y) });
+                ripple(e.clientX, e.clientY);
+                lastTap = { t: now, x: end.x, y: end.y };
             }
             dragging = false;
         });
+
+        // prawy przycisk = wstecz (zamiast menu przegladarki)
+        screenView.addEventListener("contextmenu", function (e) {
+            e.preventDefault();
+            send({ t: "back" });
+            toast("Wstecz (prawy przycisk)");
+        });
+
+        // kolo myszy = przewijanie ekranu telefonu; Ctrl+kolo = zoom
+        screenView.addEventListener("wheel", function (e) {
+            e.preventDefault();
+            if (e.ctrlKey || e.metaKey) {
+                setZoom(zoom * (e.deltaY < 0 ? 1.18 : 0.85));
+                return;
+            }
+            var now = Date.now();
+            if (now - (screenView._lastWheel || 0) < 85) return;
+            screenView._lastWheel = now;
+            var down = e.deltaY > 0;
+            var y1 = down ? 0.66 : 0.34, y2 = down ? 0.34 : 0.66;
+            send({ t: "swipe", x1: 0.5, y1: y1, x2: 0.5, y2: y2 });
+        }, { passive: false });
+
+        document.getElementById("btnZoomIn").addEventListener("click", function () { setZoom(zoom * 1.35); });
+        document.getElementById("btnZoomOut").addEventListener("click", function () { setZoom(zoom / 1.35); });
+        document.getElementById("btnZoomFit").addEventListener("click", function () { setZoom(1); });
+
+        // dotyk (telefon/tablet jako pilot)
         var touchStart = null, touchHold = null;
         screenView.addEventListener("touchstart", function (e) {
             touchStart = norm(e.touches[0]);
@@ -936,31 +1492,47 @@ html_content = """
                     touchStart = null;
                     toast("Przytrzymanie");
                 }
-            }, 550);
+            }, 520);
         }, { passive: true });
         screenView.addEventListener("touchend", function (e) {
             clearTimeout(touchHold);
             if (!touchStart) return;
             var end = norm(e.changedTouches[0]);
-            var dx = (end.x - touchStart.x) * screenView.getBoundingClientRect().width;
-            var dy = (end.y - touchStart.y) * screenView.getBoundingClientRect().height;
-            if (Math.sqrt(dx * dx + dy * dy) > 14) send({ t: "swipe", x1: r4(touchStart.x), y1: r4(touchStart.y), x2: r4(end.x), y2: r4(end.y) });
+            var r = contentRect();
+            var dx = (end.x - touchStart.x) * r.width;
+            var dy = (end.y - touchStart.y) * r.height;
+            if (Math.sqrt(dx * dx + dy * dy) > 12) send({ t: "swipe", x1: r4(touchStart.x), y1: r4(touchStart.y), x2: r4(end.x), y2: r4(end.y) });
             else send({ t: "tap", x: r4(end.x), y: r4(end.y) });
             touchStart = null;
         }, { passive: true });
-        function r4(v) { return Math.round(v * 10000) / 10000; }
 
-        document.getElementById("btnBack").addEventListener("click", function () { send({ t: "back" }); toast("Wstecz"); });
-        document.getElementById("btnHome").addEventListener("click", function () { send({ t: "home" }); toast("Home"); });
-        document.getElementById("btnRecents").addEventListener("click", function () { send({ t: "recents" }); toast("Ostatnie aplikacje"); });
-        document.getElementById("btnLock").addEventListener("click", function () { send({ t: "lock" }); toast("Blokada ekranu"); });
-        document.getElementById("btnPower").addEventListener("click", function () { send({ t: "power" }); toast("Menu zasilania"); });
-        document.getElementById("btnScreenshotPhone").addEventListener("click", function () { send({ t: "screenshot" }); toast("Zrzut na telefonie (galeria telefonu)"); });
+        // ------------------------------------------------------------------
+        // Przyciski sterowania
+        // ------------------------------------------------------------------
+        function cmdBtn(id, obj, msg) {
+            document.getElementById(id).addEventListener("click", function () { send(obj); if (msg) toast(msg); });
+        }
+        cmdBtn("btnBack", { t: "back" }, "Wstecz");
+        cmdBtn("btnHome", { t: "home" }, "Home");
+        cmdBtn("btnRecents", { t: "recents" }, "Ostatnie aplikacje");
+        cmdBtn("btnLock", { t: "lock" }, "Blokada ekranu");
+        cmdBtn("btnPower", { t: "power" }, "Menu zasilania");
+        cmdBtn("btnScreenshotPhone", { t: "screenshot" }, "Zrzut na telefonie (galeria)");
+        var kbdMode = false;
+        function setKbd(on) {
+            kbdMode = on;
+            document.getElementById("btnKbd").classList.toggle("active", on);
+            toast(on ? "Pisanie WLACZONE - pisz na klawiaturze, tekst wejdzie na telefon (Esc = wylacz)"
+                     : "Pisanie wylaczone - wracaja skroty B/H/L/F");
+        }
+        document.getElementById("btnKbd").addEventListener("click", function () { setKbd(!kbdMode); });
+        document.getElementById("btnAppsShortcut").addEventListener("click", function () { gotoTab("tabAplikacje"); });
+        document.getElementById("btnLogShortcut").addEventListener("click", function () { gotoTab("tabUstawienia"); });
 
         document.getElementById("btnPause").addEventListener("click", function () {
             paused = !paused;
             this.classList.toggle("active", paused);
-            this.innerHTML = paused ? "&#9654; Wznow" : "&#10074;&#10074; Pauza";
+            this.innerHTML = paused ? '<span class="ic">&#9654;</span>Wznow' : '<span class="ic">&#10074;&#10074;</span>Pauza';
             if (!paused) { lastFrameAt = Date.now(); renderPhones(); }
             else setPhone("pauza", true);
         });
@@ -980,8 +1552,144 @@ html_content = """
             else if (box.requestFullscreen) box.requestFullscreen();
         });
 
+        // ------------------------------------------------------------------
+        // Wykrywanie zgaszonego ekranu + nagrywanie wideo (webm)
+        // ------------------------------------------------------------------
+        function isScreenDark() {
+            try {
+                darkCtx.drawImage(screenView, 0, 0, 24, 24);
+                var d = darkCtx.getImageData(0, 0, 24, 24).data, sum = 0;
+                for (var i = 0; i < d.length; i += 4) sum += (d[i] + d[i + 1] + d[i + 2]) / 3;
+                return (sum / (d.length / 4)) < 4;   // tylko prawie czysta czern = ekran zgaszony
+            } catch (e) { return false; }
+        }
+
+        var btnRec = document.getElementById("btnRec");
+        btnRec.addEventListener("click", function () {
+            if (!screenView.src) { toast("Brak obrazu do nagrania"); return; }
+            if (rec) { rec.stop(); return; }   // drugie klikniecie = stop i zapis
+            try {
+                if (!recCanvas) recCanvas = document.createElement("canvas");
+                var nw = screenView.naturalWidth || 720, nh = screenView.naturalHeight || 1280;
+                var sc = Math.min(1, 960 / Math.max(nw, nh));
+                recCanvas.width = Math.max(2, Math.round(nw * sc));
+                recCanvas.height = Math.max(2, Math.round(nh * sc));
+                recCtx = recCanvas.getContext("2d");
+                var stream = recCanvas.captureStream(15);
+                var mime = MediaRecorder.isTypeSupported("video/webm;codecs=vp9") ? "video/webm;codecs=vp9"
+                    : (MediaRecorder.isTypeSupported("video/webm;codecs=vp8") ? "video/webm;codecs=vp8" : "video/webm");
+                rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 2500000 });
+                recChunks = [];
+                rec.ondataavailable = function (e) { if (e.data && e.data.size) recChunks.push(e.data); };
+                rec.onstop = function () {
+                    var blob = new Blob(recChunks, { type: "video/webm" });
+                    var a = document.createElement("a");
+                    a.href = URL.createObjectURL(blob);
+                    a.download = "remote-hub-nagranie-" + Date.now() + ".webm";
+                    a.click();
+                    setTimeout(function () { URL.revokeObjectURL(a.href); }, 8000);
+                    rec = null;
+                    btnRec.classList.remove("active");
+                    btnRec.innerHTML = "&#9210; Nagrywaj wideo";
+                    toast("Nagranie zapisane (" + Math.round((Date.now() - recStart) / 1000) + " s)");
+                };
+                rec.start(1000);
+                recStart = Date.now();
+                btnRec.classList.add("active");
+                btnRec.innerHTML = "&#9209; STOP - zapisz";
+                toast("Nagrywanie wlaczone - zapisuje obraz z telefonu");
+            } catch (e) {
+                rec = null;
+                toast("Nagrywanie niedostepne w tej przegladarce");
+            }
+        });
+
+        // ------------------------------------------------------------------
+        // Szybki tekst + schowek
+        // ------------------------------------------------------------------
+        function sendQuickTxt(where) {
+            var v = document.getElementById("quickTxt").value;
+            if (!v) { toast("Wpisz najpierw tekst"); return; }
+            if (send(where === "clip" ? { t: "clip", s: v } : { t: "text", s: v })) {
+                toast(where === "clip" ? "Skopiowano do schowka telefonu" : "Wyslano na ekran telefonu");
+                if (where !== "clip") document.getElementById("quickTxt").value = "";
+            } else toast("Brak polaczenia");
+        }
+        document.getElementById("btnSendTxt").addEventListener("click", function () { sendQuickTxt("text"); });
+        document.getElementById("btnClip").addEventListener("click", function () { sendQuickTxt("clip"); });
+        document.getElementById("quickTxt").addEventListener("keydown", function (e) {
+            if (e.key === "Enter") sendQuickTxt("text");
+        });
+        document.getElementById("btnPasteHint").addEventListener("click", function () {
+            toast("Na telefonie: przytrzymaj palec w polu -> Wklej");
+        });
+
+        // ------------------------------------------------------------------
+        // Aplikacje
+        // ------------------------------------------------------------------
+        function requestApps() {
+            appsRequestedAt = Date.now();
+            if (!send({ t: "apps" })) { toast("Brak polaczenia z serwerem"); appsRequestedAt = 0; return; }
+            document.getElementById("appsMeta").textContent = "...pobieranie...";
+            toast("Pobieram liste aplikacji z telefonu");
+            setTimeout(function () {
+                if (appsRequestedAt && !appsList) {
+                    appsRequestedAt = 0;
+                    document.getElementById("appsMeta").textContent = "";
+                    toast("Telefon nie odpowiedzial (apka 1.5 + sterowanie wlaczone)");
+                }
+            }, 5000);
+        }
+        document.getElementById("btnAppsRefresh").addEventListener("click", function () {
+            appsList = null; requestApps();
+        });
+        document.getElementById("btnAppsHome").addEventListener("click", function () {
+            send({ t: "home" }); toast("Home"); gotoTab("tabPodglad");
+        });
+        function renderApps() {
+            var grid = document.getElementById("appsGrid");
+            var meta = document.getElementById("appsMeta");
+            if (!appsList || !appsList.length) {
+                meta.textContent = "";
+                grid.innerHTML = '<div class="empty" style="grid-column:1/-1;"><span class="ic">&#128241;</span>' +
+                    "Telefon nie odeslal zadnej listy.<br><span style='font-size:11.5px;'>" +
+                    "Wymaga apki 1.5 i wlaczonego zdalnego sterowania.</span></div>";
+                return;
+            }
+            meta.textContent = appsList.length + " szt.";
+            var html = "";
+            appsList.forEach(function (a) {
+                var h = hue(a.p || a.l);
+                html += '<div class="apptile" data-pkg="' + a.p + '" title="' + a.p + '">' +
+                    '<div class="av" style="background:linear-gradient(135deg,hsl(' + h + ",70%,55%),hsl(" + (h + 55) + ',70%,45%));">' +
+                    initials(a.l) + '</div><div class="an">' + a.l + "</div></div>";
+            });
+            grid.innerHTML = html;
+            grid.querySelectorAll(".apptile").forEach(function (el) {
+                el.addEventListener("click", function () {
+                    if (send({ t: "launch", p: el.dataset.pkg })) {
+                        toast("Uruchamiam: " + (el.querySelector(".an").textContent));
+                        gotoTab("tabPodglad");
+                    } else toast("Brak polaczenia");
+                });
+            });
+        }
+
+        // ------------------------------------------------------------------
+        // Skroty klawiszowe
+        // ------------------------------------------------------------------
         window.addEventListener("keydown", function (e) {
-            if (e.target.tagName === "SELECT" || e.target.tagName === "INPUT") return;
+            if (e.target.tagName === "SELECT" || e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
+            if (kbdMode) {
+                if (e.key === "Escape") { setKbd(false); e.preventDefault(); return; }
+                if (e.ctrlKey || e.metaKey || e.altKey) return;
+                var kk = e.key;
+                if (kk === "Backspace" || kk === "Enter" || kk === "Tab" || (kk.length === 1 && !e.ctrlKey && !e.metaKey)) {
+                    if (send({ t: "key", k: kk })) e.preventDefault();
+                    else toast("Brak polaczenia z telefonem");
+                }
+                return;
+            }
             var k = e.key.toLowerCase();
             if (k === "b") send({ t: "back" });
             else if (k === "h") send({ t: "home" });
@@ -995,6 +1703,7 @@ html_content = """
 
 </body>
 </html>
+
 """
 
 
@@ -1137,6 +1846,8 @@ async def websocket_endpoint(websocket: WebSocket):
                     c["kind"] = "phone"
                     c["id"] = dev_id
                     c["model"] = obj.get("device") or "nieznany"
+                    if "bat" in obj:
+                        c["bat"] = obj.get("bat")
                     remember_phone(dev_id, c["model"])
                     log_event(f"Telefon polaczyl: {c['model']}")
                     if DEBUG:
@@ -1150,7 +1861,10 @@ async def websocket_endpoint(websocket: WebSocket):
 
                 if c["kind"] == "viewer":
                     await route_command(websocket, obj)
-                elif t == "stat":
+                else:
+                    # Odpowiedzi telefonu (stat, apps, wyniki komend) -> przegladarki.
+                    if "bat" in obj:
+                        c["bat"] = obj.get("bat")
                     for ws2, c2 in list(clients.items()):
                         if c2["kind"] == "viewer" and c2.get("authed", True):
                             await send_to(ws2, data)
